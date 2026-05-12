@@ -41,30 +41,31 @@ cd backend
 Path: `ios/NuraAI/`
 
 Main files (single source of truth):
-- `ios/NuraAI/NuraAIApp.swift`
-- `ios/NuraAI/AppState.swift`
-- `ios/NuraAI/RootView.swift`
-- `ios/NuraAI/AuthView.swift`
-- `ios/NuraAI/OnboardingView.swift`
-- `ios/NuraAI/MainTabView.swift`
-- `ios/NuraAI/TherapistView.swift`
-- `ios/NuraAI/MeditationView.swift`
-- `ios/NuraAI/DiscoverView.swift`
-- `ios/NuraAI/ProfileView.swift`
-- `ios/NuraAI/APIClient.swift`
-- `ios/NuraAI/Models.swift`
-- `ios/NuraAI/CalmBackground.swift`
+- `NuraAI/NuraAI/NuraAIApp.swift`
+- `NuraAI/NuraAI/AppState.swift`
+- `NuraAI/NuraAI/RootView.swift`
+- `NuraAI/NuraAI/AuthView.swift`
+- `NuraAI/NuraAI/OnboardingView.swift`
+- `NuraAI/NuraAI/MainTabView.swift`
+- `NuraAI/NuraAI/TherapistView.swift`
+- `NuraAI/NuraAI/MeditationView.swift`
+- `NuraAI/NuraAI/DiscoverView.swift`
+- `NuraAI/NuraAI/ProfileView.swift`
+- `NuraAI/NuraAI/APIClient.swift`
+- `NuraAI/NuraAI/Models.swift`
+- `NuraAI/NuraAI/CalmBackground.swift`
+- `NuraAI/NuraAI/Info.plist`
 
-### Xcode integration (no more manual add/remove every time)
-1. Keep one Xcode project locally (for example: `NuraAI/NuraAI.xcodeproj`).
-2. Add these Swift files to target once.
-3. On each `git pull`, run:
+### Xcode workflow (now simple)
+1. Keep one Xcode project locally at `NuraAI/NuraAI.xcodeproj`.
+2. Ensure target points to `NuraAI/NuraAI/*` files once.
+3. After that, future updates are just:
    ```bash
-   ./scripts/sync_ios_to_xcode.sh "$HOME/Documents/GitHub/nura-ai-assistant/NuraAI/NuraAI"
+   git pull origin master
    ```
 4. In Xcode: `Clean Build Folder` and Run.
 
-This avoids repeated reference juggling.
+No sync script required anymore.
 
 ---
 
