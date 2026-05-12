@@ -16,7 +16,8 @@ struct TherapistView: View {
     @State private var isRecording = false
     @State private var activeMode: String = "chat"
 
-    @State private var waveformPhase: CGFloat = 0
+    @State private var orbPulse = false
+    @State private var voiceState: VoiceState = .idle
     @State private var alertMessage: String?
 
     private let synth = AVSpeechSynthesizer()
@@ -33,25 +34,18 @@ struct TherapistView: View {
                 CalmBackground().onTapGesture { hideKeyboard() }
 
                 VStack(spacing: 8) {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            quickTabPill("Therapy", .therapist)
-                            quickTabPill("Meditation", .meditation)
-                            quickTabPill("Discover", .discover)
-                            quickTabPill("Profile", .profile)
-                        }
-                        .padding(.horizontal)
-                    }
-
                     if voiceOnlyMode {
-                        VoiceWaveView(phase: waveformPhase, isActive: isRecording || sending)
-                            .frame(height: 170)
-                            .padding(.horizontal)
-                            .onAppear {
-                                withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
-                                    waveformPhase = .pi * 2
-                                }
-                            }
+                        Spacer(minLength: 20)
+
+                        Text(voiceState.title)
+                            .font(.headline)
+                            .foregroundStyle(.white.opacity(0.9))
+
+                        VoiceOrbView(state: voiceState, animate: orbPulse)
+                            .frame(width: 220, height: 220)
+                            .padding(.top, 8)
+
+                        Spacer()
                     } else {
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 10) {
@@ -123,6 +117,7 @@ struct TherapistView: View {
             .onAppear {
                 configurePlaybackSession()
                 requestSpeechPermission()
+                orbPulse = true
             }
             .alert("Voice Error", isPresented: Binding(
                 get: { alertMessage != nil },
@@ -150,7 +145,11 @@ struct TherapistView: View {
             messages.append(LocalMessage(role: "user", content: text))
         }
         sending = true
-        defer { sending = false }
+        voiceState = .thinking
+        defer {
+            sending = false
+            if !isRecording { voiceState = .idle }
+        }
 
         do {
             let resp = try await APIClient.shared.sendMessage(
@@ -237,6 +236,7 @@ struct TherapistView: View {
             try audioEngine.start()
             isRecording = true
             voiceOnlyMode = true
+            voiceState = .listening
 
             var transcript = ""
             recognitionTask = recognizer.recognitionTask(with: request) { result, error in
@@ -245,6 +245,7 @@ struct TherapistView: View {
                     if result.isFinal {
                         DispatchQueue.main.async {
                             self.isRecording = false
+                            self.voiceState = .thinking
                             self.audioEngine.stop()
                             self.audioEngine.inputNode.removeTap(onBus: 0)
                             Task { await self.sendUserMessage(transcript) }
@@ -254,6 +255,7 @@ struct TherapistView: View {
                 if let error {
                     DispatchQueue.main.async {
                         self.isRecording = false
+                        self.voiceState = .idle
                         self.audioEngine.stop()
                         self.audioEngine.inputNode.removeTap(onBus: 0)
                         self.alertMessage = "Voice input failed: \(error.localizedDescription)"
@@ -262,6 +264,7 @@ struct TherapistView: View {
             }
         } catch {
             isRecording = false
+            voiceState = .idle
             alertMessage = "Could not start recording: \(error.localizedDescription)"
         }
     }
@@ -269,6 +272,7 @@ struct TherapistView: View {
     @MainActor
     private func stopRecordingAndSend() {
         isRecording = false
+        voiceState = .thinking
         audioEngine.stop()
         recognitionRequest?.endAudio()
         audioEngine.inputNode.removeTap(onBus: 0)
@@ -294,37 +298,30 @@ struct TherapistView: View {
     @MainActor
     private func speakNatural(_ text: String) async {
         configurePlaybackSession()
+        voiceState = .speaking
         do {
             let data = try await APIClient.shared.synthesizeSpeech(baseURL: appState.apiBaseURL, text: text, style: "warm_female")
             audioPlayer = try AVAudioPlayer(data: data)
             audioPlayer?.prepareToPlay()
             audioPlayer?.play()
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0.8, (audioPlayer?.duration ?? 1.2))) {
+                if !self.isRecording { self.voiceState = .idle }
+            }
         } catch {
             speakFallback(text)
         }
     }
 
     private func speakFallback(_ text: String) {
+        voiceState = .speaking
         synth.stopSpeaking(at: .immediate)
         let utterance = AVSpeechUtterance(string: text)
         utterance.rate = 0.46
         utterance.pitchMultiplier = 1.0
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         synth.speak(utterance)
-    }
-
-    @ViewBuilder
-    private func quickTabPill(_ title: String, _ tab: AppState.Tab) -> some View {
-        Button {
-            appState.selectedTab = tab
-        } label: {
-            Text(title)
-                .font(.caption)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(appState.selectedTab == tab ? Color.cyan.opacity(0.35) : Color.white.opacity(0.12))
-                .clipShape(Capsule())
-                .foregroundStyle(.white)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            if !self.isRecording { self.voiceState = .idle }
         }
     }
 
@@ -333,30 +330,69 @@ struct TherapistView: View {
     }
 }
 
-private struct VoiceWaveView: View {
-    let phase: CGFloat
-    let isActive: Bool
+private enum VoiceState {
+    case idle
+    case listening
+    case thinking
+    case speaking
+
+    var title: String {
+        switch self {
+        case .idle: return "Ready"
+        case .listening: return "Listening"
+        case .thinking: return "Thinking"
+        case .speaking: return "Speaking"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .idle: return .white
+        case .listening: return .cyan
+        case .thinking: return .purple
+        case .speaking: return .mint
+        }
+    }
+
+    var scaleRange: ClosedRange<CGFloat> {
+        switch self {
+        case .idle: return 1.0...1.03
+        case .listening: return 1.0...1.12
+        case .thinking: return 0.96...1.02
+        case .speaking: return 1.0...1.18
+        }
+    }
+}
+
+private struct VoiceOrbView: View {
+    let state: VoiceState
+    let animate: Bool
 
     var body: some View {
-        GeometryReader { geo in
-            let midY = geo.size.height / 2
-            let width = geo.size.width
+        ZStack {
+            Circle()
+                .fill(state.color.opacity(0.20))
+                .frame(width: 210, height: 210)
+                .scaleEffect(animate ? state.scaleRange.upperBound : state.scaleRange.lowerBound)
+                .blur(radius: 3)
 
-            ZStack {
-                RoundedRectangle(cornerRadius: 20)
-                    .fill(.white.opacity(0.10))
-
-                Path { p in
-                    p.move(to: CGPoint(x: 0, y: midY))
-                    for x in stride(from: 0.0, through: width, by: 2) {
-                        let progress = x / width
-                        let amplitude: CGFloat = isActive ? 22 : 6
-                        let y = midY + sin((progress * 8 * .pi) + phase) * amplitude
-                        p.addLine(to: CGPoint(x: x, y: y))
-                    }
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [state.color.opacity(0.95), state.color.opacity(0.35)],
+                        center: .center,
+                        startRadius: 18,
+                        endRadius: 110
+                    )
+                )
+                .frame(width: 136, height: 136)
+                .overlay {
+                    Circle()
+                        .stroke(.white.opacity(0.5), lineWidth: 1)
                 }
-                .stroke(.white.opacity(0.9), lineWidth: 2)
-            }
+                .shadow(color: state.color.opacity(0.45), radius: 18, x: 0, y: 0)
+                .scaleEffect(animate ? state.scaleRange.upperBound : state.scaleRange.lowerBound)
         }
+        .animation(.easeInOut(duration: state == .speaking ? 0.28 : 0.7).repeatForever(autoreverses: true), value: animate)
     }
 }
