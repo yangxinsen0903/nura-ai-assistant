@@ -17,6 +17,7 @@ struct TherapistView: View {
     @State private var activeMode: String = "chat"
 
     @State private var waveformPhase: CGFloat = 0
+    @State private var alertMessage: String?
 
     private let synth = AVSpeechSynthesizer()
     private let audioEngine = AVAudioEngine()
@@ -123,6 +124,14 @@ struct TherapistView: View {
                 configurePlaybackSession()
                 requestSpeechPermission()
             }
+            .alert("Voice Error", isPresented: Binding(
+                get: { alertMessage != nil },
+                set: { if !$0 { alertMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(alertMessage ?? "Unknown error")
+            }
         }
     }
 
@@ -179,49 +188,81 @@ struct TherapistView: View {
         if isRecording {
             stopRecordingAndSend()
         } else {
-            startRecording()
+            await startRecording()
         }
     }
 
-    private func startRecording() {
-        recognitionTask?.cancel()
-        recognitionTask = nil
-
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        recognitionRequest = request
-        request.shouldReportPartialResults = true
-
-        let inputNode = audioEngine.inputNode
-        let recordingFormat = inputNode.outputFormat(forBus: 0)
-        inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
-            request.append(buffer)
+    @MainActor
+    private func startRecording() async {
+        guard let recognizer, recognizer.isAvailable else {
+            alertMessage = "Speech recognizer is currently unavailable."
+            return
         }
 
-        audioEngine.prepare()
-        try? audioEngine.start()
-        isRecording = true
+        if SFSpeechRecognizer.authorizationStatus() != .authorized {
+            alertMessage = "Please allow Speech Recognition in Settings."
+            return
+        }
 
-        var transcript = ""
-        recognitionTask = recognizer?.recognitionTask(with: request) { result, error in
-            if let result = result {
-                transcript = result.bestTranscription.formattedString
-                if result.isFinal {
+        let micAllowed = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            AVAudioSession.sharedInstance().requestRecordPermission { granted in
+                continuation.resume(returning: granted)
+            }
+        }
+        guard micAllowed else {
+            alertMessage = "Please allow Microphone access in Settings."
+            return
+        }
+
+        do {
+            try configureRecordSession()
+            audioPlayer?.stop()
+            synth.stopSpeaking(at: .immediate)
+
+            recognitionTask?.cancel()
+            recognitionTask = nil
+
+            let request = SFSpeechAudioBufferRecognitionRequest()
+            recognitionRequest = request
+            request.shouldReportPartialResults = true
+
+            let inputNode = audioEngine.inputNode
+            let recordingFormat = inputNode.outputFormat(forBus: 0)
+            inputNode.removeTap(onBus: 0)
+            inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
+                request.append(buffer)
+            }
+
+            audioEngine.prepare()
+            try audioEngine.start()
+            isRecording = true
+            voiceOnlyMode = true
+
+            var transcript = ""
+            recognitionTask = recognizer.recognitionTask(with: request) { result, error in
+                if let result = result {
+                    transcript = result.bestTranscription.formattedString
+                    if result.isFinal {
+                        DispatchQueue.main.async {
+                            self.isRecording = false
+                            self.audioEngine.stop()
+                            self.audioEngine.inputNode.removeTap(onBus: 0)
+                            Task { await self.sendUserMessage(transcript) }
+                        }
+                    }
+                }
+                if let error {
                     DispatchQueue.main.async {
                         self.isRecording = false
                         self.audioEngine.stop()
                         self.audioEngine.inputNode.removeTap(onBus: 0)
-                        Task { await self.sendUserMessage(transcript) }
+                        self.alertMessage = "Voice input failed: \(error.localizedDescription)"
                     }
                 }
             }
-            if error != nil {
-                DispatchQueue.main.async {
-                    self.isRecording = false
-                    self.audioEngine.stop()
-                    self.audioEngine.inputNode.removeTap(onBus: 0)
-                }
-            }
+        } catch {
+            isRecording = false
+            alertMessage = "Could not start recording: \(error.localizedDescription)"
         }
     }
 
@@ -237,14 +278,22 @@ struct TherapistView: View {
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers, .allowBluetooth, .allowAirPlay])
+            try session.overrideOutputAudioPort(.speaker)
             try session.setActive(true)
         } catch {
-            // ignore, fallback still works
+            // keep silent; fallback still works
         }
+    }
+
+    private func configureRecordSession() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetooth, .duckOthers])
+        try session.setActive(true, options: .notifyOthersOnDeactivation)
     }
 
     @MainActor
     private func speakNatural(_ text: String) async {
+        configurePlaybackSession()
         do {
             let data = try await APIClient.shared.synthesizeSpeech(baseURL: appState.apiBaseURL, text: text, style: "warm_female")
             audioPlayer = try AVAudioPlayer(data: data)
