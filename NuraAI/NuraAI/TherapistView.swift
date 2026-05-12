@@ -16,7 +16,6 @@ struct TherapistView: View {
     @State private var isRecording = false
     @State private var activeMode: String = "chat"
 
-    @State private var orbPulse = false
     @State private var voiceState: VoiceState = .idle
     @State private var alertMessage: String?
 
@@ -41,8 +40,8 @@ struct TherapistView: View {
                             .font(.headline)
                             .foregroundStyle(.white.opacity(0.9))
 
-                        VoiceOrbView(state: voiceState, animate: orbPulse)
-                            .frame(width: 220, height: 220)
+                        VoiceOrbView(state: voiceState)
+                            .frame(width: 230, height: 230)
                             .padding(.top, 8)
 
                         Spacer()
@@ -117,7 +116,6 @@ struct TherapistView: View {
             .onAppear {
                 configurePlaybackSession()
                 requestSpeechPermission()
-                orbPulse = true
             }
             .alert("Voice Error", isPresented: Binding(
                 get: { alertMessage != nil },
@@ -366,33 +364,62 @@ private enum VoiceState {
 
 private struct VoiceOrbView: View {
     let state: VoiceState
-    let animate: Bool
 
     var body: some View {
-        ZStack {
-            Circle()
-                .fill(state.color.opacity(0.20))
-                .frame(width: 210, height: 210)
-                .scaleEffect(animate ? state.scaleRange.upperBound : state.scaleRange.lowerBound)
-                .blur(radius: 3)
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            let pulse = 0.5 + 0.5 * sin(t * (state == .speaking ? 8.5 : state == .listening ? 5.5 : 2.2))
+            let slow = 0.5 + 0.5 * sin(t * 1.1)
+            let baseScale = state.scaleRange.lowerBound + (state.scaleRange.upperBound - state.scaleRange.lowerBound) * CGFloat(pulse)
 
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [state.color.opacity(0.95), state.color.opacity(0.35)],
-                        center: .center,
-                        startRadius: 18,
-                        endRadius: 110
-                    )
-                )
-                .frame(width: 136, height: 136)
-                .overlay {
+            ZStack {
+                // soft outer aura
+                Circle()
+                    .fill(state.color.opacity(0.10 + 0.18 * slow))
+                    .frame(width: 220, height: 220)
+                    .scaleEffect(1.0 + 0.08 * CGFloat(slow))
+                    .blur(radius: 8)
+
+                // animated rings
+                ForEach(0..<3, id: \.self) { idx in
+                    let offset = Double(idx) * 0.9
+                    let ringPulse = 0.5 + 0.5 * sin((t + offset) * (state == .speaking ? 6.0 : 3.0))
                     Circle()
-                        .stroke(.white.opacity(0.5), lineWidth: 1)
+                        .stroke(state.color.opacity(0.12 + 0.22 * ringPulse), lineWidth: 2)
+                        .frame(width: 150 + CGFloat(idx) * 28, height: 150 + CGFloat(idx) * 28)
+                        .scaleEffect(0.95 + 0.09 * CGFloat(ringPulse))
+                        .blur(radius: idx == 2 ? 2 : 0)
                 }
-                .shadow(color: state.color.opacity(0.45), radius: 18, x: 0, y: 0)
-                .scaleEffect(animate ? state.scaleRange.upperBound : state.scaleRange.lowerBound)
+
+                // floating blobs around core
+                ForEach(0..<6, id: \.self) { i in
+                    let fi = Double(i)
+                    let angle = t * (state == .speaking ? 1.9 : 1.1) + fi * (.pi * 2 / 6)
+                    let radius: CGFloat = state == .speaking ? 54 : 48
+                    Circle()
+                        .fill(state.color.opacity(0.20))
+                        .frame(width: state == .speaking ? 18 : 14, height: state == .speaking ? 18 : 14)
+                        .offset(x: cos(angle) * radius, y: sin(angle) * radius)
+                        .blur(radius: 1)
+                }
+
+                // core orb
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [state.color.opacity(0.98), state.color.opacity(0.48), .white.opacity(0.12)],
+                            center: .center,
+                            startRadius: 6,
+                            endRadius: 90
+                        )
+                    )
+                    .frame(width: 134, height: 134)
+                    .overlay {
+                        Circle().stroke(.white.opacity(0.45), lineWidth: 1)
+                    }
+                    .shadow(color: state.color.opacity(0.55), radius: 24, x: 0, y: 0)
+                    .scaleEffect(baseScale)
+            }
         }
-        .animation(.easeInOut(duration: state == .speaking ? 0.28 : 0.7).repeatForever(autoreverses: true), value: animate)
     }
 }
