@@ -40,27 +40,31 @@ cd backend
 ## iOS source files
 Path: `ios/NuraAI/`
 
-Main files:
-- `NuraAIApp.swift`
-- `AppState.swift`
-- `RootView.swift`
-- `AuthView.swift`
-- `OnboardingView.swift`
-- `MainTabView.swift`
-- `TherapistView.swift`
-- `MeditationView.swift`
-- `DiscoverView.swift`
-- `ProfileView.swift`
-- `APIClient.swift`
-- `Models.swift`
-- `CalmBackground.swift`
+Main files (single source of truth):
+- `ios/NuraAI/NuraAIApp.swift`
+- `ios/NuraAI/AppState.swift`
+- `ios/NuraAI/RootView.swift`
+- `ios/NuraAI/AuthView.swift`
+- `ios/NuraAI/OnboardingView.swift`
+- `ios/NuraAI/MainTabView.swift`
+- `ios/NuraAI/TherapistView.swift`
+- `ios/NuraAI/MeditationView.swift`
+- `ios/NuraAI/DiscoverView.swift`
+- `ios/NuraAI/ProfileView.swift`
+- `ios/NuraAI/APIClient.swift`
+- `ios/NuraAI/Models.swift`
+- `ios/NuraAI/CalmBackground.swift`
 
-### Xcode integration
-1. Create iOS SwiftUI project named `NuraAI`.
-2. Copy above files into your target.
-3. Ensure `apiBaseURL` points to VPS endpoint:
-   - `http://100.99.145.120:8010/api/v1`
-4. Add ATS exception for HTTP during MVP testing.
+### Xcode integration (no more manual add/remove every time)
+1. Keep one Xcode project locally (for example: `NuraAI/NuraAI.xcodeproj`).
+2. Add these Swift files to target once.
+3. On each `git pull`, run:
+   ```bash
+   ./scripts/sync_ios_to_xcode.sh "$HOME/Documents/GitHub/nura-ai-assistant/NuraAI/NuraAI"
+   ```
+4. In Xcode: `Clean Build Folder` and Run.
+
+This avoids repeated reference juggling.
 
 ---
 
