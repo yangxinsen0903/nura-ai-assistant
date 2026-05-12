@@ -1,4 +1,6 @@
 import SwiftUI
+import AVFoundation
+import UIKit
 
 struct TherapistView: View {
     @EnvironmentObject private var appState: AppState
@@ -8,13 +10,28 @@ struct TherapistView: View {
     ]
     @State private var input = ""
     @State private var sending = false
+    @State private var voiceReplyEnabled = true
+
+    private let synth = AVSpeechSynthesizer()
 
     var body: some View {
         NavigationStack {
             ZStack {
                 CalmBackground()
+                    .onTapGesture { hideKeyboard() }
 
-                VStack {
+                VStack(spacing: 8) {
+                    // quick tab switch pills so user can always escape chat
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            quickTabPill("Therapy", .therapist)
+                            quickTabPill("Meditation", .meditation)
+                            quickTabPill("Discover", .discover)
+                            quickTabPill("Profile", .profile)
+                        }
+                        .padding(.horizontal)
+                    }
+
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 10) {
                             ForEach(messages) { msg in
@@ -52,6 +69,19 @@ struct TherapistView: View {
             }
             .navigationTitle("Nura Therapist")
             .toolbarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Toggle(isOn: $voiceReplyEnabled) {
+                        Image(systemName: voiceReplyEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                            .foregroundStyle(.white)
+                    }
+                    .labelsHidden()
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { hideKeyboard() }
+                }
+            }
         }
     }
 
@@ -69,8 +99,56 @@ struct TherapistView: View {
         do {
             let resp = try await APIClient.shared.sendMessage(baseURL: appState.apiBaseURL, userId: userId, content: text)
             messages.append(LocalMessage(role: "assistant", content: resp.reply))
+            if voiceReplyEnabled {
+                speak(resp.reply)
+            }
         } catch {
-            messages.append(LocalMessage(role: "assistant", content: "I’m here with you — connection had a hiccup. Let’s try again."))
+            let fallback = "I’m here with you — connection had a hiccup. Let’s try again."
+            messages.append(LocalMessage(role: "assistant", content: fallback))
+            if voiceReplyEnabled {
+                speak(fallback)
+            }
         }
+    }
+
+    @ViewBuilder
+    private func quickTabPill(_ title: String, _ tab: AppState.Tab) -> some View {
+        Button {
+            appState.selectedTab = tab
+        } label: {
+            Text(title)
+                .font(.caption)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(appState.selectedTab == tab ? Color.cyan.opacity(0.35) : Color.white.opacity(0.12))
+                .clipShape(Capsule())
+                .foregroundStyle(.white)
+        }
+    }
+
+    private func speak(_ text: String) {
+        synth.stopSpeaking(at: .immediate)
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.rate = 0.46
+        utterance.pitchMultiplier = 0.95
+        utterance.voice = preferredFemaleVoice() ?? AVSpeechSynthesisVoice(language: "en-US")
+        synth.speak(utterance)
+    }
+
+    private func preferredFemaleVoice() -> AVSpeechSynthesisVoice? {
+        let prefs = ["Samantha", "Ava", "Allison", "Karen", "Moira"]
+        let voices = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix("en") }
+        for name in prefs {
+            if let v = voices.first(where: { $0.name.localizedCaseInsensitiveContains(name) }) {
+                return v
+            }
+        }
+        return voices.first
+    }
+
+    private func hideKeyboard() {
+        #if canImport(UIKit)
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        #endif
     }
 }
