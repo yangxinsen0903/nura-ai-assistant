@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import Speech
 import UIKit
 
 struct TherapistView: View {
@@ -11,17 +12,26 @@ struct TherapistView: View {
     @State private var input = ""
     @State private var sending = false
     @State private var voiceReplyEnabled = true
+    @State private var voiceOnlyMode = false
+    @State private var isRecording = false
+    @State private var activeMode: String = "chat"
+
+    @State private var waveformPhase: CGFloat = 0
 
     private let synth = AVSpeechSynthesizer()
+    private let audioEngine = AVAudioEngine()
+    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    @State private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    @State private var recognitionTask: SFSpeechRecognitionTask?
+
+    @State private var audioPlayer: AVAudioPlayer?
 
     var body: some View {
         NavigationStack {
             ZStack {
-                CalmBackground()
-                    .onTapGesture { hideKeyboard() }
+                CalmBackground().onTapGesture { hideKeyboard() }
 
                 VStack(spacing: 8) {
-                    // quick tab switch pills so user can always escape chat
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             quickTabPill("Therapy", .therapist)
@@ -32,21 +42,32 @@ struct TherapistView: View {
                         .padding(.horizontal)
                     }
 
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 10) {
-                            ForEach(messages) { msg in
-                                HStack {
-                                    if msg.role == "assistant" { Spacer(minLength: 0) }
-                                    Text(msg.content)
-                                        .foregroundStyle(.white)
-                                        .padding(12)
-                                        .background(msg.role == "assistant" ? Color.white.opacity(0.18) : Color.cyan.opacity(0.26))
-                                        .clipShape(RoundedRectangle(cornerRadius: 14))
-                                    if msg.role == "user" { Spacer(minLength: 0) }
+                    if voiceOnlyMode {
+                        VoiceWaveView(phase: waveformPhase, isActive: isRecording || sending)
+                            .frame(height: 170)
+                            .padding(.horizontal)
+                            .onAppear {
+                                withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
+                                    waveformPhase = .pi * 2
                                 }
                             }
+                    } else {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 10) {
+                                ForEach(messages) { msg in
+                                    HStack {
+                                        if msg.role == "assistant" { Spacer(minLength: 0) }
+                                        Text(msg.content)
+                                            .foregroundStyle(.white)
+                                            .padding(12)
+                                            .background(msg.role == "assistant" ? Color.white.opacity(0.18) : Color.cyan.opacity(0.26))
+                                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                                        if msg.role == "user" { Spacer(minLength: 0) }
+                                    }
+                                }
+                            }
+                            .padding()
                         }
-                        .padding()
                     }
 
                     HStack(spacing: 8) {
@@ -55,14 +76,24 @@ struct TherapistView: View {
                             .background(.white.opacity(0.15))
                             .foregroundStyle(.white)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .opacity(voiceOnlyMode ? 0.35 : 1)
+                            .disabled(voiceOnlyMode)
 
-                        Button(sending ? "..." : "Send") {
-                            Task { await send() }
+                        Button(action: { Task { await sendText() } }) {
+                            Text(sending ? "..." : "Send")
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(.white)
                         .foregroundStyle(.black)
-                        .disabled(sending || input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(sending || input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || voiceOnlyMode)
+
+                        Button {
+                            Task { await toggleRecording() }
+                        } label: {
+                            Image(systemName: isRecording ? "stop.circle.fill" : "mic.circle.fill")
+                                .font(.system(size: 28))
+                                .foregroundStyle(isRecording ? .red : .white)
+                        }
                     }
                     .padding()
                 }
@@ -70,7 +101,13 @@ struct TherapistView: View {
             .navigationTitle("Nura Therapist")
             .toolbarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Toggle(isOn: $voiceOnlyMode) {
+                        Image(systemName: voiceOnlyMode ? "waveform" : "text.bubble")
+                            .foregroundStyle(.white)
+                    }
+                    .labelsHidden()
+
                     Toggle(isOn: $voiceReplyEnabled) {
                         Image(systemName: voiceReplyEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
                             .foregroundStyle(.white)
@@ -82,33 +119,149 @@ struct TherapistView: View {
                     Button("Done") { hideKeyboard() }
                 }
             }
+            .onAppear {
+                configurePlaybackSession()
+                requestSpeechPermission()
+            }
         }
     }
 
     @MainActor
-    private func send() async {
-        guard let userId = appState.userId else { return }
+    private func sendText() async {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-
-        messages.append(LocalMessage(role: "user", content: text))
         input = ""
+        await sendUserMessage(text)
+    }
+
+    @MainActor
+    private func sendUserMessage(_ text: String) async {
+        guard let userId = appState.userId, !text.isEmpty else { return }
+
+        if !voiceOnlyMode {
+            messages.append(LocalMessage(role: "user", content: text))
+        }
         sending = true
         defer { sending = false }
 
         do {
-            let resp = try await APIClient.shared.sendMessage(baseURL: appState.apiBaseURL, userId: userId, content: text)
-            messages.append(LocalMessage(role: "assistant", content: resp.reply))
+            let resp = try await APIClient.shared.sendMessage(
+                baseURL: appState.apiBaseURL,
+                userId: userId,
+                content: text,
+                mode: activeMode
+            )
+            activeMode = resp.mode
+
+            if !voiceOnlyMode {
+                messages.append(LocalMessage(role: "assistant", content: resp.reply))
+            }
             if voiceReplyEnabled {
-                speak(resp.reply)
+                await speakNatural(resp.reply)
             }
         } catch {
             let fallback = "I’m here with you — connection had a hiccup. Let’s try again."
-            messages.append(LocalMessage(role: "assistant", content: fallback))
+            if !voiceOnlyMode {
+                messages.append(LocalMessage(role: "assistant", content: fallback))
+            }
             if voiceReplyEnabled {
-                speak(fallback)
+                await speakNatural(fallback)
             }
         }
+    }
+
+    private func requestSpeechPermission() {
+        SFSpeechRecognizer.requestAuthorization { _ in }
+        AVAudioSession.sharedInstance().requestRecordPermission { _ in }
+    }
+
+    @MainActor
+    private func toggleRecording() async {
+        if isRecording {
+            stopRecordingAndSend()
+        } else {
+            startRecording()
+        }
+    }
+
+    private func startRecording() {
+        recognitionTask?.cancel()
+        recognitionTask = nil
+
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        recognitionRequest = request
+        request.shouldReportPartialResults = true
+
+        let inputNode = audioEngine.inputNode
+        let recordingFormat = inputNode.outputFormat(forBus: 0)
+        inputNode.removeTap(onBus: 0)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
+            request.append(buffer)
+        }
+
+        audioEngine.prepare()
+        try? audioEngine.start()
+        isRecording = true
+
+        var transcript = ""
+        recognitionTask = recognizer?.recognitionTask(with: request) { result, error in
+            if let result = result {
+                transcript = result.bestTranscription.formattedString
+                if result.isFinal {
+                    DispatchQueue.main.async {
+                        self.isRecording = false
+                        self.audioEngine.stop()
+                        self.audioEngine.inputNode.removeTap(onBus: 0)
+                        Task { await self.sendUserMessage(transcript) }
+                    }
+                }
+            }
+            if error != nil {
+                DispatchQueue.main.async {
+                    self.isRecording = false
+                    self.audioEngine.stop()
+                    self.audioEngine.inputNode.removeTap(onBus: 0)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func stopRecordingAndSend() {
+        isRecording = false
+        audioEngine.stop()
+        recognitionRequest?.endAudio()
+        audioEngine.inputNode.removeTap(onBus: 0)
+    }
+
+    private func configurePlaybackSession() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers, .allowBluetooth, .allowAirPlay])
+            try session.setActive(true)
+        } catch {
+            // ignore, fallback still works
+        }
+    }
+
+    @MainActor
+    private func speakNatural(_ text: String) async {
+        do {
+            let data = try await APIClient.shared.synthesizeSpeech(baseURL: appState.apiBaseURL, text: text, style: "warm_female")
+            audioPlayer = try AVAudioPlayer(data: data)
+            audioPlayer?.prepareToPlay()
+            audioPlayer?.play()
+        } catch {
+            speakFallback(text)
+        }
+    }
+
+    private func speakFallback(_ text: String) {
+        synth.stopSpeaking(at: .immediate)
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.rate = 0.46
+        utterance.pitchMultiplier = 1.0
+        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        synth.speak(utterance)
     }
 
     @ViewBuilder
@@ -126,29 +279,35 @@ struct TherapistView: View {
         }
     }
 
-    private func speak(_ text: String) {
-        synth.stopSpeaking(at: .immediate)
-        let utterance = AVSpeechUtterance(string: text)
-        utterance.rate = 0.46
-        utterance.pitchMultiplier = 0.95
-        utterance.voice = preferredFemaleVoice() ?? AVSpeechSynthesisVoice(language: "en-US")
-        synth.speak(utterance)
+    private func hideKeyboard() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
+}
 
-    private func preferredFemaleVoice() -> AVSpeechSynthesisVoice? {
-        let prefs = ["Samantha", "Ava", "Allison", "Karen", "Moira"]
-        let voices = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix("en") }
-        for name in prefs {
-            if let v = voices.first(where: { $0.name.localizedCaseInsensitiveContains(name) }) {
-                return v
+private struct VoiceWaveView: View {
+    let phase: CGFloat
+    let isActive: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            let midY = geo.size.height / 2
+            let width = geo.size.width
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 20)
+                    .fill(.white.opacity(0.10))
+
+                Path { p in
+                    p.move(to: CGPoint(x: 0, y: midY))
+                    for x in stride(from: 0.0, through: width, by: 2) {
+                        let progress = x / width
+                        let amplitude: CGFloat = isActive ? 22 : 6
+                        let y = midY + sin((progress * 8 * .pi) + phase) * amplitude
+                        p.addLine(to: CGPoint(x: x, y: y))
+                    }
+                }
+                .stroke(.white.opacity(0.9), lineWidth: 2)
             }
         }
-        return voices.first
-    }
-
-    private func hideKeyboard() {
-        #if canImport(UIKit)
-        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-        #endif
     }
 }

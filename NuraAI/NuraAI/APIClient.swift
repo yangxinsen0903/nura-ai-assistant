@@ -25,8 +25,8 @@ final class APIClient {
         return try JSONDecoder().decode(UserProfile.self, from: data)
     }
 
-    func sendMessage(baseURL: String, userId: Int, content: String) async throws -> ChatMessageResponse {
-        try await request(baseURL: baseURL, path: "/chat/message", method: "POST", body: ChatMessageRequest(user_id: userId, content: content), responseType: ChatMessageResponse.self)
+    func sendMessage(baseURL: String, userId: Int, content: String, mode: String?) async throws -> ChatMessageResponse {
+        try await request(baseURL: baseURL, path: "/chat/message", method: "POST", body: ChatMessageRequest(user_id: userId, content: content, mode: mode), responseType: ChatMessageResponse.self)
     }
 
     func fetchMeditations(baseURL: String) async throws -> [MeditationItem] {
@@ -45,6 +45,55 @@ final class APIClient {
             throw URLError(.badServerResponse)
         }
         return try JSONDecoder().decode([DiscoverItem].self, from: data)
+    }
+
+    func transcribeAudio(baseURL: String, audioData: Data, filename: String = "speech.m4a") async throws -> String {
+        guard let url = URL(string: baseURL + "/voice/transcribe") else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+
+        let boundary = "Boundary-\(UUID().uuidString)"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: audio/m4a\r\n\r\n".data(using: .utf8)!)
+        body.append(audioData)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        request.httpBody = body
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw URLError(.badServerResponse)
+        }
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return (obj?["text"] as? String) ?? ""
+    }
+
+    func synthesizeSpeech(baseURL: String, text: String, style: String = "warm_female") async throws -> Data {
+        guard let url = URL(string: baseURL + "/voice/tts") else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+
+        let boundary = "Boundary-\(UUID().uuidString)"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"text\"\r\n\r\n".data(using: .utf8)!)
+        body.append(text.data(using: .utf8)!)
+        body.append("\r\n--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"style\"\r\n\r\n".data(using: .utf8)!)
+        body.append(style.data(using: .utf8)!)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        request.httpBody = body
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw URLError(.badServerResponse)
+        }
+        return data
     }
 
     private func request<T: Codable, R: Codable>(

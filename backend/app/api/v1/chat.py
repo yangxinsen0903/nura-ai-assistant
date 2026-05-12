@@ -13,9 +13,21 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 def send_message(payload: ChatMessageRequest, db: Session = Depends(get_db)):
     db.add(ChatMessage(user_id=payload.user_id, role="user", content=payload.content))
 
-    reply, emotion, risk_level = generate_reply(payload.content)
+    history_rows = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.user_id == payload.user_id)
+        .order_by(ChatMessage.created_at.asc())
+        .all()
+    )
+    history = [f"{m.role}:{m.content}" for m in history_rows]
+
+    reply, emotion, risk_level, mode = generate_reply(
+        user_text=payload.content,
+        history=history,
+        requested_mode=payload.mode,
+    )
 
     db.add(ChatMessage(user_id=payload.user_id, role="assistant", content=reply, emotion=emotion))
     db.commit()
 
-    return ChatMessageResponse(reply=reply, emotion=emotion, risk_level=risk_level)
+    return ChatMessageResponse(reply=reply, emotion=emotion, risk_level=risk_level, mode=mode)

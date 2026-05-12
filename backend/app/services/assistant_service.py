@@ -3,48 +3,92 @@ from __future__ import annotations
 from app.core.config import settings
 from app.services.emotion_service import analyze_text_emotion
 
+NEGATIVE = {"anxious", "overwhelmed", "panic", "stress", "sad", "lonely"}
+MEDITATION_TRIGGERS = {"meditate", "meditation", "breathing", "calm me down", "grounding"}
 
-def _fallback_reply(user_text: str, emotion: str, risk_level: str) -> str:
+
+def infer_mode(user_text: str, requested_mode: str | None, history: list[str]) -> str:
+    text = user_text.lower()
+    if requested_mode in {"chat", "meditation"}:
+        return requested_mode
+
+    if any(k in text for k in MEDITATION_TRIGGERS):
+        return "meditation"
+
+    recent = " ".join(history[-4:]).lower()
+    if "guided meditation" in recent or "breathing" in recent:
+        return "meditation"
+
+    return "chat"
+
+
+def _fallback_reply(user_text: str, emotion: str, risk_level: str, mode: str) -> str:
     if risk_level == "high":
         return (
-            "我听到你现在非常难受。你不需要一个人扛着。"
-            "如果你有伤害自己的冲动，请立刻联系当地紧急服务或危机热线，"
-            "并告诉一位你信任的人你现在需要陪伴。"
+            "I hear that you're in intense distress. You're not alone right now. "
+            "If you might hurt yourself, please contact local emergency services or a crisis hotline immediately."
         )
-    if emotion == "anxious":
+
+    if mode == "meditation":
         return (
-            "我在。先一起慢下来：吸气4秒，呼气6秒，做3轮。"
-            "你愿意告诉我，眼下最压着你的那件事是什么吗？"
+            "Let’s do a short guided reset. Step 1: sit comfortably and place one hand on your chest. "
+            "Step 2: inhale through your nose for 4 counts. Step 3: exhale slowly for 6 counts. "
+            "Repeat this for 5 rounds. Tell me when you're done and I’ll guide the next step."
         )
+
+    if emotion == "anxious":
+        return "I’m here with you. Let’s slow your nervous system first: inhale 4, exhale 6, for 3 rounds. What feels heaviest right now?"
     if emotion == "calm":
-        return "听起来你在慢慢稳定下来，这是很好的信号。要不要我们顺着这个状态做一个今天的小目标？"
-    return "我在听。你可以从现在最想说的一件事开始，我会陪你理清它。"
+        return "You’re sounding steadier. Nice work. Do you want a quick reflection, or a small plan for the next hour?"
+    return "I’m listening. Start with the one thing that feels most important right now."
 
 
-def generate_reply(user_text: str) -> tuple[str, str, str]:
+def _build_system_prompt(mode: str) -> str:
+    base = (
+        "You are Nura.ai, an empathetic AI therapist-style support assistant. "
+        "Never claim to be a licensed clinician. Do not diagnose. Be warm, concise, and practical. "
+        "If self-harm risk appears, prioritize immediate emergency guidance. "
+        "Keep replies under 120 words unless user asks for more."
+    )
+
+    if mode == "meditation":
+        return (
+            base
+            + " User requested guided meditation. Stay in guided meditation mode. "
+            "Use step-by-step instructions (one clear step per turn), with breath counts and grounding cues. "
+            "Do not switch topics unless user asks."
+        )
+
+    return base
+
+
+def generate_reply(user_text: str, history: list[str], requested_mode: str | None = None) -> tuple[str, str, str, str]:
     emotion, _score, risk_level = analyze_text_emotion(user_text)
+    mode = infer_mode(user_text, requested_mode, history)
 
     if not settings.openai_api_key:
-        return _fallback_reply(user_text, emotion, risk_level), emotion, risk_level
+        return _fallback_reply(user_text, emotion, risk_level, mode), emotion, risk_level, mode
 
     try:
         from openai import OpenAI
 
         client = OpenAI(api_key=settings.openai_api_key)
-        system_prompt = (
-            "You are Nura.ai, an empathetic emotional-support assistant. "
-            "Do not provide medical diagnosis. Keep responses warm, concise, and safe. "
-            "If severe self-harm intent appears, encourage immediate local emergency help."
-        )
+        system_prompt = _build_system_prompt(mode)
+
+        messages = [{"role": "system", "content": system_prompt}]
+        for item in history[-8:]:
+            role, content = item.split(":", 1)
+            messages.append({"role": role, "content": content.strip()})
+        messages.append({"role": "user", "content": user_text})
+
         resp = client.chat.completions.create(
             model=settings.openai_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text},
-            ],
-            temperature=0.7,
+            messages=messages,
+            temperature=0.5,
+            max_tokens=180,
         )
-        text = resp.choices[0].message.content or _fallback_reply(user_text, emotion, risk_level)
-        return text.strip(), emotion, risk_level
+
+        text = resp.choices[0].message.content or _fallback_reply(user_text, emotion, risk_level, mode)
+        return text.strip(), emotion, risk_level, mode
     except Exception:
-        return _fallback_reply(user_text, emotion, risk_level), emotion, risk_level
+        return _fallback_reply(user_text, emotion, risk_level, mode), emotion, risk_level, mode

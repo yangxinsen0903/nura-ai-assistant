@@ -38,12 +38,14 @@ struct UserProfile: Codable {
 struct ChatMessageRequest: Codable {
     let user_id: Int
     let content: String
+    let mode: String?
 }
 
 struct ChatMessageResponse: Codable {
     let reply: String
     let emotion: String
     let risk_level: String
+    let mode: String
 }
 
 struct LocalMessage: Identifiable {

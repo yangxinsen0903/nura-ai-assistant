@@ -38,5 +38,9 @@
     <key>NSAllowsArbitraryLoads</key>
     <true/>
   </dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Nura uses your microphone for voice conversations.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Nura uses speech recognition to understand your voice input.</string>
 </dict>
 </plist>
