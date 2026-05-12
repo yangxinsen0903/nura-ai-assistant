@@ -6,3 +6,6 @@ __pycache__/
 .DS_Store
 .env
 backend/.env
+
+xcuserdata/
+*.xcuserstate
