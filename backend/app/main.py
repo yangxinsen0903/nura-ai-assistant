@@ -13,9 +13,7 @@ import app.models  # noqa: F401
 
 app = FastAPI(title=settings.app_name)
 
-# MVP phase: keep schema in sync aggressively for sqlite dev
-if settings.database_url.startswith("sqlite"):
-    Base.metadata.drop_all(bind=engine)
+# Keep existing data; only create missing tables
 Base.metadata.create_all(bind=engine)
 
 app.include_router(health_router)
