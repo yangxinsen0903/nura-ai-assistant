@@ -1,14 +1,16 @@
 import SwiftUI
 
 struct RootView: View {
-    @EnvironmentObject var appState: AppState
+    @EnvironmentObject private var appState: AppState
 
     var body: some View {
         Group {
-            if appState.isLoggedIn {
-                ChatView()
-            } else {
+            if !appState.isLoggedIn {
+                AuthView()
+            } else if !appState.onboardingCompleted {
                 OnboardingView()
+            } else {
+                MainTabView()
             }
         }
     }

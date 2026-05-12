@@ -1,14 +1,38 @@
 import Foundation
 
-struct AnonymousLoginRequest: Codable {
-    let device_id: String
-    let nickname: String?
+struct RegisterRequest: Codable {
+    let email: String
+    let password: String
 }
 
-struct TokenResponse: Codable {
+struct LoginRequest: Codable {
+    let email: String
+    let password: String
+}
+
+struct AuthResponse: Codable {
     let access_token: String
     let token_type: String
     let user_id: Int
+    let onboarding_completed: Bool
+}
+
+struct OnboardingRequest: Codable {
+    let user_id: Int
+    let name: String
+    let date_of_birth: String
+    let occupation: String
+    let has_therapist_treatment: Bool
+}
+
+struct UserProfile: Codable {
+    let user_id: Int
+    let email: String
+    let name: String?
+    let date_of_birth: String?
+    let occupation: String?
+    let has_therapist_treatment: Bool?
+    let onboarding_completed: Bool
 }
 
 struct ChatMessageRequest: Codable {
@@ -26,4 +50,17 @@ struct LocalMessage: Identifiable {
     let id = UUID()
     let role: String
     let content: String
+}
+
+struct MeditationItem: Codable, Identifiable {
+    let id: String
+    let title: String
+    let duration_min: Int
+    let category: String
+}
+
+struct DiscoverItem: Codable, Identifiable {
+    let id: String
+    let title: String
+    let type: String
 }
