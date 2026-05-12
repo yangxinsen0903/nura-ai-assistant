@@ -6,6 +6,7 @@ __pycache__/
 .DS_Store
 .env
 backend/.env
-
 xcuserdata/
 *.xcuserstate
+NuraAI_src/
+_backup/

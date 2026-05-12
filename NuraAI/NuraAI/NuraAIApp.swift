@@ -1,17 +1,13 @@
-//
-//  NuraAIApp.swift
-//  NuraAI
-//
-//  Created by Alex Yang on 5/12/26.
-//
-
 import SwiftUI
 
 @main
 struct NuraAIApp: App {
+    @StateObject private var appState = AppState()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
+                .environmentObject(appState)
         }
     }
 }
