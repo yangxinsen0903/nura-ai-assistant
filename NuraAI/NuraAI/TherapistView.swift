@@ -86,50 +86,37 @@ struct TherapistView: View {
                         }
                     }
 
-                    HStack(spacing: 8) {
-                        TextField("Share what’s on your mind...", text: $input, axis: .vertical)
-                            .padding(10)
-                            .background(.white.opacity(0.15))
-                            .foregroundStyle(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                            .opacity(voiceOnlyMode ? 0.35 : 1)
-                            .disabled(voiceOnlyMode)
+                    if !voiceOnlyMode {
+                        HStack(spacing: 8) {
+                            TextField("Share what’s on your mind...", text: $input, axis: .vertical)
+                                .padding(10)
+                                .background(.white.opacity(0.15))
+                                .foregroundStyle(.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
 
-                        Button(action: { Task { await sendText() } }) {
-                            Text(sending ? "..." : "Send")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.white)
-                        .foregroundStyle(.black)
-                        .disabled(sending || input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || voiceOnlyMode)
+                            Button(action: { Task { await sendText() } }) {
+                                Text(sending ? "..." : "Send")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.white)
+                            .foregroundStyle(.black)
+                            .disabled(sending || input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-                        Button {
-                            Task { await toggleRecording() }
-                        } label: {
-                            Image(systemName: (isConversationActive || isRecording) ? "stop.circle.fill" : "mic.circle.fill")
-                                .font(.system(size: 28))
-                                .foregroundStyle((isConversationActive || isRecording) ? .red : .white)
+                            Button {
+                                Task { await toggleRecording() }
+                            } label: {
+                                Image(systemName: "waveform.circle.fill")
+                                    .font(.system(size: 30))
+                                    .foregroundStyle(.white)
+                            }
                         }
+                        .padding()
                     }
-                    .padding()
                 }
             }
             .navigationTitle("Nura Therapist")
             .toolbarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Toggle(isOn: $voiceOnlyMode) {
-                        Image(systemName: voiceOnlyMode ? "waveform" : "text.bubble")
-                            .foregroundStyle(.white)
-                    }
-                    .labelsHidden()
-
-                    Toggle(isOn: $voiceReplyEnabled) {
-                        Image(systemName: voiceReplyEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                            .foregroundStyle(.white)
-                    }
-                    .labelsHidden()
-                }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
                     Button("Done") { hideKeyboard() }
