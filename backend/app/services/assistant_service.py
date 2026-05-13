@@ -159,12 +159,17 @@ def generate_reply(
         model = settings.openai_voice_model if source == "voice" else settings.openai_model
         max_tokens = 110 if source == "voice" else 150
 
-        resp = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.45,
-            max_tokens=max_tokens,
-        )
+        create_kwargs = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.45,
+        }
+        if str(model).startswith("gpt-5"):
+            create_kwargs["max_completion_tokens"] = max_tokens
+        else:
+            create_kwargs["max_tokens"] = max_tokens
+
+        resp = client.chat.completions.create(**create_kwargs)
 
         text = resp.choices[0].message.content or _fallback_reply(user_text, emotion, risk_level, mode)
         return text.strip(), emotion, risk_level, mode
