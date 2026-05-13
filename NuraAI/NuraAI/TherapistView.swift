@@ -22,6 +22,9 @@ struct TherapistView: View {
     @State private var pendingTranscript = ""
     @State private var silenceAutoSendTask: Task<Void, Never>?
     @State private var idleSessionTask: Task<Void, Never>?
+    @State private var silenceWatcherTask: Task<Void, Never>?
+    @State private var heardSpeechInTurn = false
+    @State private var lastVoiceActivityAt = Date()
 
     private let synth = AVSpeechSynthesizer()
     private let audioEngine = AVAudioEngine()
@@ -38,7 +41,20 @@ struct TherapistView: View {
 
                 VStack(spacing: 8) {
                     if voiceOnlyMode {
-                        Spacer(minLength: 20)
+                        HStack {
+                            Spacer()
+                            Button {
+                                Task { await stopConversationSession(byVoiceCommand: false) }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 30))
+                                    .foregroundStyle(.white.opacity(0.95))
+                            }
+                            .padding(.trailing, 14)
+                            .padding(.top, 8)
+                        }
+
+                        Spacer(minLength: 10)
 
                         Text(voiceState.title)
                             .font(.headline)
@@ -217,7 +233,7 @@ struct TherapistView: View {
     @MainActor
     private func toggleRecording() async {
         if isConversationActive {
-            stopConversationSession(byVoiceCommand: false)
+            await stopConversationSession(byVoiceCommand: false)
         } else {
             isConversationActive = true
             voiceOnlyMode = true
@@ -262,12 +278,27 @@ struct TherapistView: View {
             let request = SFSpeechAudioBufferRecognitionRequest()
             recognitionRequest = request
             request.shouldReportPartialResults = true
+            request.taskHint = .dictation
 
             let inputNode = audioEngine.inputNode
             let recordingFormat = inputNode.outputFormat(forBus: 0)
             inputNode.removeTap(onBus: 0)
             inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
                 request.append(buffer)
+
+                // basic energy-based VAD for hands-free turn end
+                guard let channel = buffer.floatChannelData?[0] else { return }
+                let count = Int(buffer.frameLength)
+                if count <= 0 { return }
+                var sum: Float = 0
+                for i in 0..<count { sum += channel[i] * channel[i] }
+                let rms = sqrt(sum / Float(count))
+                if rms > 0.012 {
+                    DispatchQueue.main.async {
+                        self.heardSpeechInTurn = true
+                        self.lastVoiceActivityAt = Date()
+                    }
+                }
             }
 
             audioEngine.prepare()
@@ -275,6 +306,9 @@ struct TherapistView: View {
             isRecording = true
             voiceOnlyMode = true
             voiceState = .listening
+            heardSpeechInTurn = false
+            lastVoiceActivityAt = Date()
+            startSilenceWatcher()
 
             recognitionTask = recognizer.recognitionTask(with: request) { result, error in
                 if let result = result {
@@ -329,6 +363,8 @@ struct TherapistView: View {
 
         silenceAutoSendTask?.cancel()
         silenceAutoSendTask = nil
+        silenceWatcherTask?.cancel()
+        silenceWatcherTask = nil
 
         let text = pendingTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         pendingTranscript = ""
@@ -343,6 +379,9 @@ struct TherapistView: View {
 
         if text.isEmpty {
             if isConversationActive {
+                if heardSpeechInTurn {
+                    alertMessage = "I heard audio but couldn't transcribe it. Please speak a bit slower and closer to the mic."
+                }
                 voiceState = .listening
                 await startRecording()
             }
@@ -350,7 +389,7 @@ struct TherapistView: View {
         }
 
         if shouldEndConversation(text) {
-            stopConversationSession(byVoiceCommand: true)
+            await stopConversationSession(byVoiceCommand: true)
             return
         }
 
@@ -358,7 +397,7 @@ struct TherapistView: View {
     }
 
     @MainActor
-    private func stopConversationSession(byVoiceCommand: Bool) {
+    private func stopConversationSession(byVoiceCommand: Bool) async {
         isConversationActive = false
         isRecording = false
         pendingTranscript = ""
@@ -366,6 +405,8 @@ struct TherapistView: View {
         silenceAutoSendTask = nil
         idleSessionTask?.cancel()
         idleSessionTask = nil
+        silenceWatcherTask?.cancel()
+        silenceWatcherTask = nil
 
         audioEngine.stop()
         recognitionRequest?.endAudio()
@@ -392,6 +433,24 @@ struct TherapistView: View {
     }
 
     @MainActor
+    private func startSilenceWatcher() {
+        silenceWatcherTask?.cancel()
+        silenceWatcherTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                if Task.isCancelled { return }
+                await MainActor.run {
+                    guard self.isConversationActive, self.isRecording, !self.sending else { return }
+                    let silentFor = Date().timeIntervalSince(self.lastVoiceActivityAt)
+                    if self.heardSpeechInTurn && silentFor > 1.05 {
+                        Task { await self.finalizeCurrentUtterance() }
+                    }
+                }
+            }
+        }
+    }
+
+    @MainActor
     private func scheduleIdleSessionTimeout() {
         idleSessionTask?.cancel()
         idleSessionTask = Task {
@@ -399,7 +458,7 @@ struct TherapistView: View {
             if Task.isCancelled { return }
             await MainActor.run {
                 if self.isConversationActive && !self.isRecording && !self.sending {
-                    self.stopConversationSession(byVoiceCommand: false)
+                    Task { await self.stopConversationSession(byVoiceCommand: false) }
                 }
             }
         }
