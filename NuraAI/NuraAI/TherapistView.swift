@@ -442,15 +442,17 @@ struct TherapistView: View {
             audioPlayer = try AVAudioPlayer(data: data)
             audioPlayer?.prepareToPlay()
             audioPlayer?.play()
-            DispatchQueue.main.asyncAfter(deadline: .now() + max(0.8, (audioPlayer?.duration ?? 1.2))) {
-                if !self.isRecording { self.voiceState = .idle }
-            }
+
+            let playDuration = max(0.9, audioPlayer?.duration ?? estimatedSpeechDuration(text: text, speed: speed))
+            try? await Task.sleep(nanoseconds: UInt64(playDuration * 1_000_000_000))
+            if !isRecording { voiceState = .idle }
         } catch {
-            speakFallback(text, speed: speed)
+            await speakFallback(text, speed: speed)
         }
     }
 
-    private func speakFallback(_ text: String, speed: Double = 0.9) {
+    @MainActor
+    private func speakFallback(_ text: String, speed: Double = 0.9) async {
         voiceState = .speaking
         synth.stopSpeaking(at: .immediate)
         let utterance = AVSpeechUtterance(string: text)
@@ -458,9 +460,10 @@ struct TherapistView: View {
         utterance.pitchMultiplier = 1.0
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         synth.speak(utterance)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            if !self.isRecording { self.voiceState = .idle }
-        }
+
+        let estimated = estimatedSpeechDuration(text: text, speed: speed)
+        try? await Task.sleep(nanoseconds: UInt64(max(0.9, estimated) * 1_000_000_000))
+        if !isRecording { voiceState = .idle }
     }
 
     private func speechSpeed(emotion: String, riskLevel: String) -> Double {
@@ -468,6 +471,12 @@ struct TherapistView: View {
         if emotion == "anxious" || emotion == "high_distress" { return 0.84 }
         if emotion == "calm" { return 0.92 }
         return 0.90
+    }
+
+    private func estimatedSpeechDuration(text: String, speed: Double) -> Double {
+        let words = max(1, text.split(separator: " ").count)
+        let baseWps = 2.4 * max(0.7, speed)
+        return Double(words) / baseWps + 0.4
     }
 
     private func hideKeyboard() {
