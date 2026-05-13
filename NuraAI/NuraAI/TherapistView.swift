@@ -293,13 +293,25 @@ struct TherapistView: View {
                 if let error {
                     DispatchQueue.main.async {
                         let msg = error.localizedDescription.lowercased()
+                        self.isRecording = false
+                        self.audioEngine.stop()
+                        self.audioEngine.inputNode.removeTap(onBus: 0)
+
                         if msg.contains("cancel") {
                             return
                         }
-                        self.isRecording = false
+
+                        if msg.contains("no speech") || msg.contains("no speech detected") {
+                            self.voiceState = .listening
+                            if self.isConversationActive {
+                                Task { await self.startRecording() }
+                            } else {
+                                self.voiceState = .idle
+                            }
+                            return
+                        }
+
                         self.voiceState = .idle
-                        self.audioEngine.stop()
-                        self.audioEngine.inputNode.removeTap(onBus: 0)
                         self.alertMessage = "Voice input failed: \(error.localizedDescription)"
                     }
                 }
