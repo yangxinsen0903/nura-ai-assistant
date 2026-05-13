@@ -143,6 +143,11 @@ struct TherapistView: View {
     private func sendUserMessage(_ text: String, fromHandsFree: Bool = false) async {
         guard let userId = appState.userId, !text.isEmpty else { return }
 
+        if fromHandsFree && text.count < 2 {
+            if isConversationActive { await startRecording() }
+            return
+        }
+
         if !voiceOnlyMode {
             messages.append(LocalMessage(role: "user", content: text))
         }
@@ -204,6 +209,7 @@ struct TherapistView: View {
         } else {
             isConversationActive = true
             voiceOnlyMode = true
+            voiceReplyEnabled = true // hands-free session always speaks back
             scheduleIdleSessionTimeout()
             await startRecording()
         }
@@ -313,6 +319,7 @@ struct TherapistView: View {
 
         if text.isEmpty {
             if isConversationActive {
+                voiceState = .listening
                 await startRecording()
             }
             return
@@ -343,8 +350,9 @@ struct TherapistView: View {
         recognitionTask = nil
 
         voiceState = .idle
+        voiceOnlyMode = false
 
-        if byVoiceCommand && !voiceOnlyMode {
+        if byVoiceCommand {
             messages.append(LocalMessage(role: "assistant", content: "Session ended. I’m here whenever you want to continue."))
         }
     }
