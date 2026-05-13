@@ -153,10 +153,7 @@ struct TherapistView: View {
         }
         sending = true
         voiceState = .thinking
-        defer {
-            sending = false
-            if !isRecording { voiceState = .idle }
-        }
+        var shouldResumeHandsFree = false
 
         do {
             let resp = try await APIClient.shared.sendMessage(
@@ -193,7 +190,15 @@ struct TherapistView: View {
 
         scheduleIdleSessionTimeout()
         if fromHandsFree && isConversationActive {
+            shouldResumeHandsFree = true
+        }
+
+        sending = false
+        if shouldResumeHandsFree && isConversationActive {
+            voiceState = .listening
             await startRecording()
+        } else if !isRecording {
+            voiceState = .idle
         }
     }
 
