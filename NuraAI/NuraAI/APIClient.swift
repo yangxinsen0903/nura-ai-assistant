@@ -71,7 +71,7 @@ final class APIClient {
         return (obj?["text"] as? String) ?? ""
     }
 
-    func synthesizeSpeech(baseURL: String, text: String, style: String = "warm_female") async throws -> Data {
+    func synthesizeSpeech(baseURL: String, text: String, style: String = "warm_female", speed: Double = 0.9) async throws -> Data {
         guard let url = URL(string: baseURL + "/voice/tts") else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -86,6 +86,9 @@ final class APIClient {
         body.append("\r\n--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"style\"\r\n\r\n".data(using: .utf8)!)
         body.append(style.data(using: .utf8)!)
+        body.append("\r\n--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"speed\"\r\n\r\n".data(using: .utf8)!)
+        body.append(String(format: "%.2f", speed).data(using: .utf8)!)
         body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
         request.httpBody = body
 

@@ -162,7 +162,7 @@ struct TherapistView: View {
                 messages.append(LocalMessage(role: "assistant", content: resp.reply))
             }
             if voiceReplyEnabled {
-                await speakNatural(resp.reply)
+                await speakNatural(resp.reply, emotion: resp.emotion, riskLevel: resp.risk_level)
             }
         } catch {
             let fallback = "I’m here with you — connection had a hiccup. Let’s try again."
@@ -294,11 +294,17 @@ struct TherapistView: View {
     }
 
     @MainActor
-    private func speakNatural(_ text: String) async {
+    private func speakNatural(_ text: String, emotion: String = "neutral", riskLevel: String = "low") async {
         configurePlaybackSession()
         voiceState = .speaking
+        let speed = speechSpeed(emotion: emotion, riskLevel: riskLevel)
         do {
-            let data = try await APIClient.shared.synthesizeSpeech(baseURL: appState.apiBaseURL, text: text, style: "warm_female")
+            let data = try await APIClient.shared.synthesizeSpeech(
+                baseURL: appState.apiBaseURL,
+                text: text,
+                style: "warm_female",
+                speed: speed
+            )
             audioPlayer = try AVAudioPlayer(data: data)
             audioPlayer?.prepareToPlay()
             audioPlayer?.play()
@@ -306,21 +312,28 @@ struct TherapistView: View {
                 if !self.isRecording { self.voiceState = .idle }
             }
         } catch {
-            speakFallback(text)
+            speakFallback(text, speed: speed)
         }
     }
 
-    private func speakFallback(_ text: String) {
+    private func speakFallback(_ text: String, speed: Double = 0.9) {
         voiceState = .speaking
         synth.stopSpeaking(at: .immediate)
         let utterance = AVSpeechUtterance(string: text)
-        utterance.rate = 0.46
+        utterance.rate = Float(max(0.38, min(0.50, speed * 0.50)))
         utterance.pitchMultiplier = 1.0
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         synth.speak(utterance)
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
             if !self.isRecording { self.voiceState = .idle }
         }
+    }
+
+    private func speechSpeed(emotion: String, riskLevel: String) -> Double {
+        if riskLevel == "high" { return 0.80 }
+        if emotion == "anxious" || emotion == "high_distress" { return 0.84 }
+        if emotion == "calm" { return 0.92 }
+        return 0.90
     }
 
     private func hideKeyboard() {

@@ -22,6 +22,7 @@ def send_message(payload: ChatMessageRequest, db: Session = Depends(get_db)):
     history = [f"{m.role}:{m.content}" for m in history_rows]
 
     reply, emotion, risk_level, mode = generate_reply(
+        user_id=payload.user_id,
         user_text=payload.content,
         history=history,
         requested_mode=payload.mode,

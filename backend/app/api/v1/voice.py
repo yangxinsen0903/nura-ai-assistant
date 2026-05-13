@@ -8,7 +8,7 @@ router = APIRouter(prefix="/voice", tags=["voice"])
 
 
 @router.post("/tts")
-def tts(text: str = Form(...), style: str = Form("warm_female")):
+def tts(text: str = Form(...), style: str = Form("warm_female"), speed: float = Form(0.9)):
     if not settings.openai_api_key:
         raise HTTPException(status_code=503, detail="TTS unavailable")
 
@@ -20,11 +20,13 @@ def tts(text: str = Form(...), style: str = Form("warm_female")):
         if style == "warm_female":
             voice = "nova"
 
+        safe_speed = max(0.75, min(1.05, speed))
         audio = client.audio.speech.create(
             model="gpt-4o-mini-tts",
             voice=voice,
             input=text,
             response_format="mp3",
+            speed=safe_speed,
         )
         data = audio.read()
         return StreamingResponse(BytesIO(data), media_type="audio/mpeg")
