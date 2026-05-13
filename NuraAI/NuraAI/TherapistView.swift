@@ -441,16 +441,14 @@ struct TherapistView: View {
             )
             audioPlayer = try AVAudioPlayer(data: data)
             audioPlayer?.prepareToPlay()
-            audioPlayer?.play()
 
             let started = audioPlayer?.play() ?? false
-            if started {
-                while audioPlayer?.isPlaying == true {
-                    try? await Task.sleep(nanoseconds: 150_000_000)
-                }
-            } else {
-                let playDuration = max(0.9, audioPlayer?.duration ?? estimatedSpeechDuration(text: text, speed: speed))
-                try? await Task.sleep(nanoseconds: UInt64(playDuration * 1_000_000_000))
+            guard started else {
+                throw NSError(domain: "NuraVoice", code: -1001, userInfo: [NSLocalizedDescriptionKey: "TTS audio could not start playback"])
+            }
+
+            while audioPlayer?.isPlaying == true {
+                try? await Task.sleep(nanoseconds: 150_000_000)
             }
             if !isRecording { voiceState = .idle }
         } catch {
