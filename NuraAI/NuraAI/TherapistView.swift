@@ -168,10 +168,14 @@ struct TherapistView: View {
             if voiceReplyEnabled {
                 await speakNatural(resp.reply, emotion: resp.emotion, riskLevel: resp.risk_level)
             }
-        } catch is CancellationError {
-            // Ignore task cancellation from hands-free session restarts.
         } catch {
             let detail = error.localizedDescription
+            let lowered = detail.lowercased()
+            let ns = error as NSError
+            if error is CancellationError || lowered.contains("cancel") || ns.code == NSURLErrorCancelled {
+                return
+            }
+
             let fallback = "I’m having trouble reaching the server right now. Please try again."
             if !voiceOnlyMode {
                 messages.append(LocalMessage(role: "assistant", content: "\(fallback) (\(detail))"))
