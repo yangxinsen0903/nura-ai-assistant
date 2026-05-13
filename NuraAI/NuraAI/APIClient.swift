@@ -25,8 +25,8 @@ final class APIClient {
         return try JSONDecoder().decode(UserProfile.self, from: data)
     }
 
-    func sendMessage(baseURL: String, userId: Int, content: String, mode: String?) async throws -> ChatMessageResponse {
-        try await request(baseURL: baseURL, path: "/chat/message", method: "POST", body: ChatMessageRequest(user_id: userId, content: content, mode: mode), responseType: ChatMessageResponse.self)
+    func sendMessage(baseURL: String, userId: Int, content: String, mode: String?, source: String? = nil) async throws -> ChatMessageResponse {
+        try await request(baseURL: baseURL, path: "/chat/message", method: "POST", body: ChatMessageRequest(user_id: userId, content: content, mode: mode, source: source), responseType: ChatMessageResponse.self)
     }
 
     func fetchMeditations(baseURL: String) async throws -> [MeditationItem] {

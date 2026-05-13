@@ -59,17 +59,20 @@ def _fallback_reply(user_text: str, emotion: str, risk_level: str, mode: str) ->
     return "I’m listening. Start with the one thing that feels most important right now."
 
 
-def _build_system_prompt(mode: str, emotion: str) -> str:
+def _build_system_prompt(mode: str, emotion: str, source: str | None = None) -> str:
     pace = "Use short lines with calm rhythm and natural pauses."
     if emotion in {"anxious", "high_distress"}:
         pace = "Use extra calm, slower pacing. Keep each sentence short and soothing with brief pauses."
+
+    brevity = "Keep replies under 90 words unless user asks for more."
+    if source == "voice":
+        brevity = "For voice chat, keep replies under 55 words, one clear idea at a time."
 
     base = (
         "You are Nura.ai, an empathetic emotional support assistant. "
         "Never claim to be a licensed clinician. Do not diagnose. Be warm, concise, and practical. "
         "If self-harm risk appears, prioritize immediate emergency guidance. "
-        "Keep replies under 90 words unless user asks for more. "
-        + pace
+        + brevity + " " + pace
     )
 
     if mode == "meditation":
@@ -122,7 +125,13 @@ def _meditation_reply(user_id: int, user_text: str, risk_level: str) -> str:
     return _MEDITATION_STEPS[state.step_index]
 
 
-def generate_reply(user_id: int, user_text: str, history: list[str], requested_mode: str | None = None) -> tuple[str, str, str, str]:
+def generate_reply(
+    user_id: int,
+    user_text: str,
+    history: list[str],
+    requested_mode: str | None = None,
+    source: str | None = None,
+) -> tuple[str, str, str, str]:
     emotion, _score, risk_level = analyze_text_emotion(user_text)
     mode = infer_mode(user_text, requested_mode, history)
 
@@ -139,7 +148,7 @@ def generate_reply(user_id: int, user_text: str, history: list[str], requested_m
         from openai import OpenAI
 
         client = OpenAI(api_key=settings.openai_api_key)
-        system_prompt = _build_system_prompt(mode, emotion)
+        system_prompt = _build_system_prompt(mode, emotion, source=source)
 
         messages = [{"role": "system", "content": system_prompt}]
         for item in history[-8:]:
@@ -147,11 +156,14 @@ def generate_reply(user_id: int, user_text: str, history: list[str], requested_m
             messages.append({"role": role, "content": content.strip()})
         messages.append({"role": "user", "content": user_text})
 
+        model = settings.openai_voice_model if source == "voice" else settings.openai_model
+        max_tokens = 110 if source == "voice" else 150
+
         resp = client.chat.completions.create(
-            model=settings.openai_model,
+            model=model,
             messages=messages,
             temperature=0.45,
-            max_tokens=150,
+            max_tokens=max_tokens,
         )
 
         text = resp.choices[0].message.content or _fallback_reply(user_text, emotion, risk_level, mode)

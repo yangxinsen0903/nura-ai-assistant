@@ -26,6 +26,7 @@ def send_message(payload: ChatMessageRequest, db: Session = Depends(get_db)):
         user_text=payload.content,
         history=history,
         requested_mode=payload.mode,
+        source=payload.source,
     )
 
     db.add(ChatMessage(user_id=payload.user_id, role="assistant", content=reply, emotion=emotion))

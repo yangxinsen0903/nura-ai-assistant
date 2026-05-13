@@ -20,11 +20,13 @@ struct TherapistView: View {
     @State private var alertMessage: String?
     @State private var isConversationActive = false
     @State private var pendingTranscript = ""
-    @State private var silenceAutoSendTask: Task<Void, Never>?
     @State private var idleSessionTask: Task<Void, Never>?
     @State private var silenceWatcherTask: Task<Void, Never>?
+    @State private var sessionWatchdogTask: Task<Void, Never>?
     @State private var heardSpeechInTurn = false
     @State private var lastVoiceActivityAt = Date()
+    @State private var lastStateTransitionAt = Date()
+    @State private var sessionTurnId = 0
 
     private let synth = AVSpeechSynthesizer()
     private let audioEngine = AVAudioEngine()
@@ -167,8 +169,11 @@ struct TherapistView: View {
         if !voiceOnlyMode {
             messages.append(LocalMessage(role: "user", content: text))
         }
+        sessionTurnId += 1
+        let turnId = sessionTurnId
+
         sending = true
-        voiceState = .thinking
+        setVoiceState(.thinking)
         var shouldResumeHandsFree = false
 
         do {
@@ -176,8 +181,10 @@ struct TherapistView: View {
                 baseURL: appState.apiBaseURL,
                 userId: userId,
                 content: text,
-                mode: activeMode
+                mode: activeMode,
+                source: fromHandsFree ? "voice" : "text"
             )
+            if turnId != sessionTurnId { return }
             activeMode = resp.mode
 
             if !voiceOnlyMode {
@@ -193,10 +200,10 @@ struct TherapistView: View {
             if error is CancellationError || lowered.contains("cancel") || ns.code == NSURLErrorCancelled {
                 sending = false
                 if fromHandsFree && isConversationActive {
-                    voiceState = .listening
+                    setVoiceState(.listening)
                     await startRecording()
                 } else if !isRecording {
-                    voiceState = .idle
+                    setVoiceState(.idle)
                 }
                 return
             }
@@ -218,10 +225,10 @@ struct TherapistView: View {
 
         sending = false
         if shouldResumeHandsFree && isConversationActive {
-            voiceState = .listening
+            setVoiceState(.listening)
             await startRecording()
         } else if !isRecording {
-            voiceState = .idle
+            setVoiceState(.idle)
         }
     }
 
@@ -238,7 +245,9 @@ struct TherapistView: View {
             isConversationActive = true
             voiceOnlyMode = true
             voiceReplyEnabled = true // hands-free session always speaks back
+            sessionTurnId = 0
             scheduleIdleSessionTimeout()
+            startSessionWatchdog()
             await startRecording()
         }
     }
@@ -305,7 +314,7 @@ struct TherapistView: View {
             try audioEngine.start()
             isRecording = true
             voiceOnlyMode = true
-            voiceState = .listening
+            setVoiceState(.listening)
             heardSpeechInTurn = false
             lastVoiceActivityAt = Date()
             startSilenceWatcher()
@@ -316,9 +325,6 @@ struct TherapistView: View {
                         let transcript = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
                         self.pendingTranscript = transcript
                         self.scheduleIdleSessionTimeout()
-                        if !transcript.isEmpty {
-                            self.scheduleAutoSendOnSilence()
-                        }
                         if result.isFinal {
                             Task { await self.finalizeCurrentUtterance() }
                         }
@@ -336,23 +342,23 @@ struct TherapistView: View {
                         }
 
                         if msg.contains("no speech") || msg.contains("no speech detected") {
-                            self.voiceState = .listening
+                            self.setVoiceState(.listening)
                             if self.isConversationActive {
                                 Task { await self.startRecording() }
                             } else {
-                                self.voiceState = .idle
+                                self.setVoiceState(.idle)
                             }
                             return
                         }
 
-                        self.voiceState = .idle
+                        self.setVoiceState(.idle)
                         self.alertMessage = "Voice input failed: \(error.localizedDescription)"
                     }
                 }
             }
         } catch {
             isRecording = false
-            voiceState = .idle
+            setVoiceState(.idle)
             alertMessage = "Could not start recording: \(error.localizedDescription)"
         }
     }
@@ -361,8 +367,6 @@ struct TherapistView: View {
     private func finalizeCurrentUtterance() async {
         guard isRecording || !(pendingTranscript.isEmpty) else { return }
 
-        silenceAutoSendTask?.cancel()
-        silenceAutoSendTask = nil
         silenceWatcherTask?.cancel()
         silenceWatcherTask = nil
 
@@ -370,7 +374,7 @@ struct TherapistView: View {
         pendingTranscript = ""
 
         isRecording = false
-        voiceState = .thinking
+        setVoiceState(.thinking)
         audioEngine.stop()
         recognitionRequest?.endAudio()
         audioEngine.inputNode.removeTap(onBus: 0)
@@ -382,7 +386,7 @@ struct TherapistView: View {
                 if heardSpeechInTurn {
                     alertMessage = "I heard audio but couldn't transcribe it. Please speak a bit slower and closer to the mic."
                 }
-                voiceState = .listening
+                setVoiceState(.listening)
                 await startRecording()
             }
             return
@@ -401,12 +405,12 @@ struct TherapistView: View {
         isConversationActive = false
         isRecording = false
         pendingTranscript = ""
-        silenceAutoSendTask?.cancel()
-        silenceAutoSendTask = nil
         idleSessionTask?.cancel()
         idleSessionTask = nil
         silenceWatcherTask?.cancel()
         silenceWatcherTask = nil
+        sessionWatchdogTask?.cancel()
+        sessionWatchdogTask = nil
 
         audioEngine.stop()
         recognitionRequest?.endAudio()
@@ -414,21 +418,11 @@ struct TherapistView: View {
         recognitionTask?.cancel()
         recognitionTask = nil
 
-        voiceState = .idle
+        setVoiceState(.idle)
         voiceOnlyMode = false
 
         if byVoiceCommand {
             messages.append(LocalMessage(role: "assistant", content: "Session ended. I’m here whenever you want to continue."))
-        }
-    }
-
-    @MainActor
-    private func scheduleAutoSendOnSilence() {
-        silenceAutoSendTask?.cancel()
-        silenceAutoSendTask = Task {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            if Task.isCancelled { return }
-            await finalizeCurrentUtterance()
         }
     }
 
@@ -489,7 +483,7 @@ struct TherapistView: View {
     @MainActor
     private func speakNatural(_ text: String, emotion: String = "neutral", riskLevel: String = "low") async {
         configurePlaybackSession()
-        voiceState = .speaking
+        setVoiceState(.speaking)
         let speed = speechSpeed(emotion: emotion, riskLevel: riskLevel)
         do {
             let data = try await APIClient.shared.synthesizeSpeech(
@@ -509,7 +503,7 @@ struct TherapistView: View {
             while audioPlayer?.isPlaying == true {
                 try? await Task.sleep(nanoseconds: 150_000_000)
             }
-            if !isRecording { voiceState = .idle }
+            if !isRecording { setVoiceState(.idle) }
         } catch {
             await speakFallback(text, speed: speed)
         }
@@ -517,7 +511,7 @@ struct TherapistView: View {
 
     @MainActor
     private func speakFallback(_ text: String, speed: Double = 0.9) async {
-        voiceState = .speaking
+        setVoiceState(.speaking)
         synth.stopSpeaking(at: .immediate)
         let utterance = AVSpeechUtterance(string: text)
         utterance.rate = Float(max(0.38, min(0.50, speed * 0.50)))
@@ -527,7 +521,7 @@ struct TherapistView: View {
 
         let estimated = estimatedSpeechDuration(text: text, speed: speed)
         try? await Task.sleep(nanoseconds: UInt64(max(0.9, estimated) * 1_000_000_000))
-        if !isRecording { voiceState = .idle }
+        if !isRecording { setVoiceState(.idle) }
     }
 
     private func speechSpeed(emotion: String, riskLevel: String) -> Double {
@@ -541,6 +535,46 @@ struct TherapistView: View {
         let words = max(1, text.split(separator: " ").count)
         let baseWps = 2.4 * max(0.7, speed)
         return Double(words) / baseWps + 0.4
+    }
+
+    @MainActor
+    private func setVoiceState(_ state: VoiceState) {
+        voiceState = state
+        lastStateTransitionAt = Date()
+    }
+
+    @MainActor
+    private func startSessionWatchdog() {
+        sessionWatchdogTask?.cancel()
+        sessionWatchdogTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if Task.isCancelled { return }
+                await MainActor.run {
+                    guard self.isConversationActive else { return }
+
+                    let stalledFor = Date().timeIntervalSince(self.lastStateTransitionAt)
+                    if self.voiceState == .listening && !self.isRecording {
+                        Task { await self.startRecording() }
+                        return
+                    }
+
+                    if self.voiceState == .listening && self.isRecording {
+                        let quietFor = Date().timeIntervalSince(self.lastVoiceActivityAt)
+                        if quietFor > 10 {
+                            self.pendingTranscript = ""
+                            self.heardSpeechInTurn = false
+                        }
+                    }
+
+                    if self.voiceState == .thinking && self.sending && stalledFor > 15 {
+                        self.sending = false
+                        self.setVoiceState(.listening)
+                        Task { await self.startRecording() }
+                    }
+                }
+            }
+        }
     }
 
     private func hideKeyboard() {

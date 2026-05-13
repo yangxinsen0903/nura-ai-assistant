@@ -39,6 +39,7 @@ struct ChatMessageRequest: Codable {
     let user_id: Int
     let content: String
     let mode: String?
+    let source: String?
 }
 
 struct ChatMessageResponse: Codable {
