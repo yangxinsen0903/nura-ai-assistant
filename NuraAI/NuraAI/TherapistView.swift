@@ -175,6 +175,13 @@ struct TherapistView: View {
             let lowered = detail.lowercased()
             let ns = error as NSError
             if error is CancellationError || lowered.contains("cancel") || ns.code == NSURLErrorCancelled {
+                sending = false
+                if fromHandsFree && isConversationActive {
+                    voiceState = .listening
+                    await startRecording()
+                } else if !isRecording {
+                    voiceState = .idle
+                }
                 return
             }
 
