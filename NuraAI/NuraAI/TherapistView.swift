@@ -443,8 +443,15 @@ struct TherapistView: View {
             audioPlayer?.prepareToPlay()
             audioPlayer?.play()
 
-            let playDuration = max(0.9, audioPlayer?.duration ?? estimatedSpeechDuration(text: text, speed: speed))
-            try? await Task.sleep(nanoseconds: UInt64(playDuration * 1_000_000_000))
+            let started = audioPlayer?.play() ?? false
+            if started {
+                while audioPlayer?.isPlaying == true {
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                }
+            } else {
+                let playDuration = max(0.9, audioPlayer?.duration ?? estimatedSpeechDuration(text: text, speed: speed))
+                try? await Task.sleep(nanoseconds: UInt64(playDuration * 1_000_000_000))
+            }
             if !isRecording { voiceState = .idle }
         } catch {
             await speakFallback(text, speed: speed)
