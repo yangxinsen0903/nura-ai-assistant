@@ -100,7 +100,17 @@ def _meditation_reply(user_id: int, user_text: str, risk_level: str) -> str:
         _meditation_sessions[user_id] = state
         return _MEDITATION_STEPS[0]
 
+    lower = user_text.lower().strip()
+    question_like = ("?" in lower) or any(k in lower for k in ["how", "why", "what if", "i feel", "can i", "should i", "too hard"])
+
     if state.awaiting_confirmation and not _is_confirmation(user_text):
+        current_step = _MEDITATION_STEPS[min(state.step_index, len(_MEDITATION_STEPS) - 1)]
+        if question_like:
+            return (
+                "Good question. Keep it gentle: if this feels too intense, reduce the count and breathe naturally. "
+                "No need to force anything. "
+                f"Return to the current step: {current_step}"
+            )
         return "Take your time. When you finish this step, say 'ready' and I’ll guide the next one."
 
     state.step_index += 1
