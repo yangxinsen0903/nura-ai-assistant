@@ -157,7 +157,7 @@ def generate_reply(
         messages.append({"role": "user", "content": user_text})
 
         model = settings.openai_voice_model if source == "voice" else settings.openai_model
-        max_tokens = 110 if source == "voice" else 150
+        max_tokens = 80 if source == "voice" else 150
 
         create_kwargs = {
             "model": model,

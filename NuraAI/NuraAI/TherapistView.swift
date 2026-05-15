@@ -23,8 +23,11 @@ struct TherapistView: View {
     @State private var idleSessionTask: Task<Void, Never>?
     @State private var silenceWatcherTask: Task<Void, Never>?
     @State private var sessionWatchdogTask: Task<Void, Never>?
+    @State private var bargeInMonitorTask: Task<Void, Never>?
+    @State private var bargeInTriggered = false
     @State private var heardSpeechInTurn = false
     @State private var lastVoiceActivityAt = Date()
+    @State private var recordingStartedAt = Date()
     @State private var lastStateTransitionAt = Date()
     @State private var sessionTurnId = 0
 
@@ -56,11 +59,7 @@ struct TherapistView: View {
                             .padding(.top, 8)
                         }
 
-                        Spacer(minLength: 10)
-
-                        Text(voiceState.title)
-                            .font(.headline)
-                            .foregroundStyle(.white.opacity(0.9))
+                        Spacer(minLength: 18)
 
                         VoiceOrbView(state: voiceState)
                             .frame(width: 230, height: 230)
@@ -289,7 +288,7 @@ struct TherapistView: View {
                 var sum: Float = 0
                 for i in 0..<count { sum += channel[i] * channel[i] }
                 let rms = sqrt(sum / Float(count))
-                if rms > 0.012 {
+                if rms > 0.008 {
                     DispatchQueue.main.async {
                         self.heardSpeechInTurn = true
                         self.lastVoiceActivityAt = Date()
@@ -304,6 +303,7 @@ struct TherapistView: View {
             setVoiceState(.listening)
             heardSpeechInTurn = false
             lastVoiceActivityAt = Date()
+            recordingStartedAt = Date()
             startSilenceWatcher()
 
             recognitionTask = recognizer.recognitionTask(with: request) { result, error in
@@ -325,6 +325,9 @@ struct TherapistView: View {
                         self.audioEngine.inputNode.removeTap(onBus: 0)
 
                         if msg.contains("cancel") {
+                            if self.isConversationActive {
+                                Task { await self.startRecording() }
+                            }
                             return
                         }
 
@@ -398,12 +401,17 @@ struct TherapistView: View {
         silenceWatcherTask = nil
         sessionWatchdogTask?.cancel()
         sessionWatchdogTask = nil
+        stopBargeInMonitor()
 
         audioEngine.stop()
         recognitionRequest?.endAudio()
         audioEngine.inputNode.removeTap(onBus: 0)
         recognitionTask?.cancel()
         recognitionTask = nil
+
+        audioPlayer?.stop()
+        audioPlayer = nil
+        synth.stopSpeaking(at: .immediate)
 
         setVoiceState(.idle)
         voiceOnlyMode = false
@@ -423,8 +431,27 @@ struct TherapistView: View {
                 await MainActor.run {
                     guard self.isConversationActive, self.isRecording, !self.sending else { return }
                     let silentFor = Date().timeIntervalSince(self.lastVoiceActivityAt)
+                    let recordingAge = Date().timeIntervalSince(self.recordingStartedAt)
+
                     if self.heardSpeechInTurn && silentFor > 1.05 {
                         Task { await self.finalizeCurrentUtterance() }
+                        return
+                    }
+
+                    // self-heal when recognizer stalls in listening too long
+                    if recordingAge > 8.0 {
+                        if !self.pendingTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Task { await self.finalizeCurrentUtterance() }
+                        } else {
+                            self.isRecording = false
+                            self.audioEngine.stop()
+                            self.audioEngine.inputNode.removeTap(onBus: 0)
+                            self.recognitionRequest?.endAudio()
+                            self.recognitionTask?.cancel()
+                            self.recognitionTask = nil
+                            self.setVoiceState(.listening)
+                            Task { await self.startRecording() }
+                        }
                     }
                 }
             }
@@ -453,8 +480,12 @@ struct TherapistView: View {
     private func configurePlaybackSession() {
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers, .allowBluetooth, .allowAirPlay])
-            try session.overrideOutputAudioPort(.speaker)
+            if isConversationActive {
+                try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth, .duckOthers])
+            } else {
+                try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers, .allowBluetooth, .allowAirPlay])
+                try session.overrideOutputAudioPort(.speaker)
+            }
             try session.setActive(true)
         } catch {
             // keep silent; fallback still works
@@ -471,6 +502,7 @@ struct TherapistView: View {
     private func speakNatural(_ text: String, emotion: String = "neutral", riskLevel: String = "low") async {
         configurePlaybackSession()
         setVoiceState(.speaking)
+        bargeInTriggered = false
         let speed = speechSpeed(emotion: emotion, riskLevel: riskLevel)
         do {
             let data = try await APIClient.shared.synthesizeSpeech(
@@ -482,16 +514,27 @@ struct TherapistView: View {
             audioPlayer = try AVAudioPlayer(data: data)
             audioPlayer?.prepareToPlay()
 
+            if isConversationActive {
+                startBargeInMonitor()
+            }
+
             let started = audioPlayer?.play() ?? false
             guard started else {
                 throw NSError(domain: "NuraVoice", code: -1001, userInfo: [NSLocalizedDescriptionKey: "TTS audio could not start playback"])
             }
 
             while audioPlayer?.isPlaying == true {
-                try? await Task.sleep(nanoseconds: 150_000_000)
+                if bargeInTriggered { break }
+                try? await Task.sleep(nanoseconds: 120_000_000)
+            }
+            stopBargeInMonitor()
+
+            if bargeInTriggered {
+                return
             }
             if !isRecording { setVoiceState(.idle) }
         } catch {
+            stopBargeInMonitor()
             await speakFallback(text, speed: speed)
         }
     }
@@ -499,6 +542,11 @@ struct TherapistView: View {
     @MainActor
     private func speakFallback(_ text: String, speed: Double = 0.9) async {
         setVoiceState(.speaking)
+        bargeInTriggered = false
+        if isConversationActive {
+            startBargeInMonitor()
+        }
+
         synth.stopSpeaking(at: .immediate)
         let utterance = AVSpeechUtterance(string: text)
         utterance.rate = Float(max(0.38, min(0.50, speed * 0.50)))
@@ -508,6 +556,9 @@ struct TherapistView: View {
 
         let estimated = estimatedSpeechDuration(text: text, speed: speed)
         try? await Task.sleep(nanoseconds: UInt64(max(0.9, estimated) * 1_000_000_000))
+        stopBargeInMonitor()
+
+        if bargeInTriggered { return }
         if !isRecording { setVoiceState(.idle) }
     }
 
@@ -531,6 +582,57 @@ struct TherapistView: View {
     }
 
     @MainActor
+    private func startBargeInMonitor() {
+        guard isConversationActive else { return }
+
+        stopBargeInMonitor()
+        bargeInTriggered = false
+
+        do {
+            try configureRecordSession()
+        } catch {
+            return
+        }
+
+        let inputNode = audioEngine.inputNode
+        let fmt = inputNode.outputFormat(forBus: 0)
+        inputNode.removeTap(onBus: 0)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: fmt) { buffer, _ in
+            guard let channel = buffer.floatChannelData?[0] else { return }
+            let count = Int(buffer.frameLength)
+            if count <= 0 { return }
+            var sum: Float = 0
+            for i in 0..<count { sum += channel[i] * channel[i] }
+            let rms = sqrt(sum / Float(count))
+            if rms > 0.020 {
+                DispatchQueue.main.async {
+                    guard self.isConversationActive, self.voiceState == .speaking, !self.bargeInTriggered else { return }
+                    self.bargeInTriggered = true
+                    self.audioPlayer?.stop()
+                    self.audioPlayer = nil
+                    self.synth.stopSpeaking(at: .immediate)
+                    self.stopBargeInMonitor()
+                    self.setVoiceState(.listening)
+                    Task { await self.startRecording() }
+                }
+            }
+        }
+
+        audioEngine.prepare()
+        try? audioEngine.start()
+    }
+
+    @MainActor
+    private func stopBargeInMonitor() {
+        bargeInMonitorTask?.cancel()
+        bargeInMonitorTask = nil
+        if !isRecording {
+            audioEngine.stop()
+            audioEngine.inputNode.removeTap(onBus: 0)
+        }
+    }
+
+    @MainActor
     private func startSessionWatchdog() {
         sessionWatchdogTask?.cancel()
         sessionWatchdogTask = Task {
@@ -551,6 +653,16 @@ struct TherapistView: View {
                         if quietFor > 10 {
                             self.pendingTranscript = ""
                             self.heardSpeechInTurn = false
+                        }
+                        let recordingAge = Date().timeIntervalSince(self.recordingStartedAt)
+                        if recordingAge > 9 {
+                            self.isRecording = false
+                            self.audioEngine.stop()
+                            self.audioEngine.inputNode.removeTap(onBus: 0)
+                            self.recognitionRequest?.endAudio()
+                            self.recognitionTask?.cancel()
+                            self.recognitionTask = nil
+                            Task { await self.startRecording() }
                         }
                     }
 
@@ -607,60 +719,67 @@ private struct VoiceOrbView: View {
     let state: VoiceState
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 45.0, paused: false)) { timeline in
             let t = timeline.date.timeIntervalSinceReferenceDate
-            let pulse = 0.5 + 0.5 * sin(t * (state == .speaking ? 8.5 : state == .listening ? 5.5 : 2.2))
-            let slow = 0.5 + 0.5 * sin(t * 1.1)
+            let pulse = 0.5 + 0.5 * sin(t * (state == .speaking ? 9.8 : state == .listening ? 6.0 : 2.4))
+            let flow = 0.5 + 0.5 * sin(t * 0.9)
             let baseScale = state.scaleRange.lowerBound + (state.scaleRange.upperBound - state.scaleRange.lowerBound) * CGFloat(pulse)
 
             ZStack {
-                // soft outer aura
                 Circle()
-                    .fill(state.color.opacity(0.10 + 0.18 * slow))
-                    .frame(width: 220, height: 220)
-                    .scaleEffect(1.0 + 0.08 * CGFloat(slow))
-                    .blur(radius: 8)
+                    .fill(state.color.opacity(0.08 + 0.18 * flow))
+                    .frame(width: 230, height: 230)
+                    .blur(radius: 16)
+                    .scaleEffect(1.0 + 0.12 * CGFloat(flow))
 
-                // animated rings
-                ForEach(0..<3, id: \.self) { idx in
-                    let offset = Double(idx) * 0.9
-                    let ringPulse = 0.5 + 0.5 * sin((t + offset) * (state == .speaking ? 6.0 : 3.0))
+                Circle()
+                    .stroke(
+                        AngularGradient(
+                            colors: [.white.opacity(0.15), state.color.opacity(0.85), .white.opacity(0.10), state.color.opacity(0.65)],
+                            center: .center
+                        ),
+                        lineWidth: 3
+                    )
+                    .frame(width: 188, height: 188)
+                    .rotationEffect(.degrees(t * (state == .speaking ? 28 : 14)))
+                    .blur(radius: 0.4)
+                    .blendMode(.plusLighter)
+
+                ForEach(0..<2, id: \.self) { idx in
+                    let d = Double(idx)
                     Circle()
-                        .stroke(state.color.opacity(0.12 + 0.22 * ringPulse), lineWidth: 2)
-                        .frame(width: 150 + CGFloat(idx) * 28, height: 150 + CGFloat(idx) * 28)
-                        .scaleEffect(0.95 + 0.09 * CGFloat(ringPulse))
-                        .blur(radius: idx == 2 ? 2 : 0)
+                        .trim(from: 0.08, to: 0.62)
+                        .stroke(state.color.opacity(0.28), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .frame(width: 164 + CGFloat(idx) * 20, height: 164 + CGFloat(idx) * 20)
+                        .rotationEffect(.degrees((t * 42) + d * 170))
+                        .blur(radius: 0.6)
                 }
 
-                // floating blobs around core
-                ForEach(0..<6, id: \.self) { i in
-                    let fi = Double(i)
-                    let angle = t * (state == .speaking ? 1.9 : 1.1) + fi * (.pi * 2 / 6)
-                    let radius: CGFloat = state == .speaking ? 54 : 48
-                    Circle()
-                        .fill(state.color.opacity(0.20))
-                        .frame(width: state == .speaking ? 18 : 14, height: state == .speaking ? 18 : 14)
-                        .offset(x: cos(angle) * radius, y: sin(angle) * radius)
-                        .blur(radius: 1)
-                }
-
-                // core orb
                 Circle()
                     .fill(
                         RadialGradient(
-                            colors: [state.color.opacity(0.98), state.color.opacity(0.48), .white.opacity(0.12)],
-                            center: .center,
-                            startRadius: 6,
-                            endRadius: 90
+                            colors: [
+                                .white.opacity(0.92),
+                                state.color.opacity(0.95),
+                                state.color.opacity(0.55),
+                                .clear
+                            ],
+                            center: UnitPoint(x: 0.42, y: 0.32),
+                            startRadius: 4,
+                            endRadius: 98
                         )
                     )
-                    .frame(width: 134, height: 134)
+                    .frame(width: 138, height: 138)
                     .overlay {
-                        Circle().stroke(.white.opacity(0.45), lineWidth: 1)
+                        Circle()
+                            .stroke(.white.opacity(0.35), lineWidth: 1.1)
+                            .blur(radius: 0.3)
                     }
-                    .shadow(color: state.color.opacity(0.55), radius: 24, x: 0, y: 0)
+                    .shadow(color: state.color.opacity(0.75), radius: 26, x: 0, y: 0)
                     .scaleEffect(baseScale)
+                    .blendMode(.plusLighter)
             }
+            .compositingGroup()
         }
     }
 }
