@@ -9,7 +9,7 @@ final class AppState: ObservableObject {
         case profile
     }
 
-    @Published var apiBaseURL: String = "http://100.99.145.120:8010/api/v1"
+    @Published var apiBaseURL: String = "https://api.zenfrog.tech/api/v1"
 
     @Published var token: String?
     @Published var userId: Int?
