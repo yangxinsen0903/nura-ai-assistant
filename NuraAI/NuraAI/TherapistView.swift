@@ -6,9 +6,7 @@ import UIKit
 struct TherapistView: View {
     @EnvironmentObject private var appState: AppState
 
-    @State private var messages: [LocalMessage] = [
-        LocalMessage(role: "assistant", content: "Hi, I’m Nura. How are you feeling right now?")
-    ]
+    @State private var messages: [LocalMessage] = []
     @State private var input = ""
     @State private var sending = false
     @State private var voiceReplyEnabled = true
@@ -124,6 +122,9 @@ struct TherapistView: View {
             .onAppear {
                 configurePlaybackSession()
                 requestSpeechPermission()
+                if messages.isEmpty {
+                    messages.append(LocalMessage(role: "assistant", content: greetingMessage()))
+                }
             }
             .alert("Voice Error", isPresented: Binding(
                 get: { alertMessage != nil },
@@ -475,6 +476,15 @@ struct TherapistView: View {
     private func shouldEndConversation(_ text: String) -> Bool {
         let t = text.lowercased()
         return t.contains("end conversation") || t.contains("stop session") || t.contains("结束对话") || t.contains("结束会话")
+    }
+
+    private func greetingMessage() -> String {
+        let rawName = appState.profile?.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let firstName = rawName.split(separator: " ").first.map(String.init) ?? ""
+        if firstName.isEmpty {
+            return "Hi, I’m Nura. How are you feeling right now?"
+        }
+        return "Hi \(firstName), I’m Nura. How are you feeling right now?"
     }
 
     private func configurePlaybackSession() {

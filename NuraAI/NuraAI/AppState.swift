@@ -17,6 +17,8 @@ final class AppState: ObservableObject {
 
     @Published var profile: UserProfile?
     @Published var selectedTab: Tab = .therapist
+    @Published var showWelcomeBackSplash: Bool = false
+    @Published var welcomeBackName: String = ""
 
     var isLoggedIn: Bool { token != nil && userId != nil }
 
@@ -26,5 +28,7 @@ final class AppState: ObservableObject {
         onboardingCompleted = false
         profile = nil
         selectedTab = .therapist
+        showWelcomeBackSplash = false
+        welcomeBackName = ""
     }
 }

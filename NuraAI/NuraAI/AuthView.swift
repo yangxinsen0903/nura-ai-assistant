@@ -92,6 +92,14 @@ struct AuthView: View {
             appState.userId = auth.user_id
             appState.onboardingCompleted = auth.onboarding_completed
             appState.profile = try? await APIClient.shared.getProfile(baseURL: appState.apiBaseURL, userId: auth.user_id)
+
+            if !isRegisterMode, auth.onboarding_completed {
+                let rawName = appState.profile?.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let firstName = rawName.split(separator: " ").first.map(String.init) ?? "there"
+                appState.welcomeBackName = firstName.isEmpty ? "there" : firstName
+                appState.showWelcomeBackSplash = true
+            }
+
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
