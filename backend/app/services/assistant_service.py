@@ -59,7 +59,7 @@ def _fallback_reply(user_text: str, emotion: str, risk_level: str, mode: str) ->
     return "I’m listening. Start with the one thing that feels most important right now."
 
 
-def _build_system_prompt(mode: str, emotion: str, source: str | None = None) -> str:
+def _build_system_prompt(mode: str, emotion: str, source: str | None = None, first_name: str | None = None) -> str:
     pace = "Use short lines with calm rhythm and natural pauses."
     if emotion in {"anxious", "high_distress"}:
         pace = "Use extra calm, slower pacing. Keep each sentence short and soothing with brief pauses."
@@ -68,11 +68,18 @@ def _build_system_prompt(mode: str, emotion: str, source: str | None = None) -> 
     if source == "voice":
         brevity = "For voice chat, keep replies under 55 words, one clear idea at a time."
 
+    personalization = ""
+    if first_name:
+        personalization = (
+            f" The user's first name is {first_name}. Use their name naturally in greetings or support moments, "
+            "but avoid repeating it every turn. If asked their name, answer correctly."
+        )
+
     base = (
         "You are Nura.ai, an empathetic emotional support assistant. "
         "Never claim to be a licensed clinician. Do not diagnose. Be warm, concise, and practical. "
         "If self-harm risk appears, prioritize immediate emergency guidance. "
-        + brevity + " " + pace
+        + brevity + " " + pace + personalization
     )
 
     if mode == "meditation":
@@ -131,6 +138,7 @@ def generate_reply(
     history: list[str],
     requested_mode: str | None = None,
     source: str | None = None,
+    first_name: str | None = None,
 ) -> tuple[str, str, str, str]:
     emotion, _score, risk_level = analyze_text_emotion(user_text)
     mode = infer_mode(user_text, requested_mode, history)
@@ -148,7 +156,7 @@ def generate_reply(
         from openai import OpenAI
 
         client = OpenAI(api_key=settings.openai_api_key)
-        system_prompt = _build_system_prompt(mode, emotion, source=source)
+        system_prompt = _build_system_prompt(mode, emotion, source=source, first_name=first_name)
 
         messages = [{"role": "system", "content": system_prompt}]
         for item in history[-8:]:

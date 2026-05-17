@@ -28,6 +28,8 @@ struct TherapistView: View {
     @State private var recordingStartedAt = Date()
     @State private var lastStateTransitionAt = Date()
     @State private var sessionTurnId = 0
+    @State private var speechStartedAt: Date?
+    @State private var adaptivePauseSeconds: TimeInterval = 0.78
 
     private let synth = AVSpeechSynthesizer()
     private let audioEngine = AVAudioEngine()
@@ -292,6 +294,7 @@ struct TherapistView: View {
                 if rms > 0.008 {
                     DispatchQueue.main.async {
                         self.heardSpeechInTurn = true
+                        if self.speechStartedAt == nil { self.speechStartedAt = Date() }
                         self.lastVoiceActivityAt = Date()
                     }
                 }
@@ -303,6 +306,7 @@ struct TherapistView: View {
             voiceOnlyMode = true
             setVoiceState(.listening)
             heardSpeechInTurn = false
+            speechStartedAt = nil
             lastVoiceActivityAt = Date()
             recordingStartedAt = Date()
             startSilenceWatcher()
@@ -364,6 +368,8 @@ struct TherapistView: View {
         let text = pendingTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         pendingTranscript = ""
 
+        let speechDuration = max(0, Date().timeIntervalSince(speechStartedAt ?? recordingStartedAt))
+
         isRecording = false
         setVoiceState(.thinking)
         audioEngine.stop()
@@ -374,14 +380,21 @@ struct TherapistView: View {
 
         if text.isEmpty {
             if isConversationActive {
-                if heardSpeechInTurn {
-                    alertMessage = "I heard audio but couldn't transcribe it. Please speak a bit slower and closer to the mic."
-                }
                 setVoiceState(.listening)
                 await startRecording()
             }
             return
         }
+
+        if !isLikelyMeaningfulTranscript(text, speechDuration: speechDuration) {
+            if isConversationActive {
+                setVoiceState(.listening)
+                await startRecording()
+            }
+            return
+        }
+
+        updateAdaptivePause(using: text, speechDuration: speechDuration)
 
         if shouldEndConversation(text) {
             await stopConversationSession(byVoiceCommand: true)
@@ -433,14 +446,15 @@ struct TherapistView: View {
                     guard self.isConversationActive, self.isRecording, !self.sending else { return }
                     let silentFor = Date().timeIntervalSince(self.lastVoiceActivityAt)
                     let recordingAge = Date().timeIntervalSince(self.recordingStartedAt)
+                    let endSilence = self.dynamicTurnEndSilence(for: self.pendingTranscript)
 
-                    if self.heardSpeechInTurn && silentFor > 1.05 {
+                    if self.heardSpeechInTurn && silentFor > endSilence {
                         Task { await self.finalizeCurrentUtterance() }
                         return
                     }
 
                     // self-heal when recognizer stalls in listening too long
-                    if recordingAge > 8.0 {
+                    if recordingAge > 7.0 {
                         if !self.pendingTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             Task { await self.finalizeCurrentUtterance() }
                         } else {
@@ -476,6 +490,58 @@ struct TherapistView: View {
     private func shouldEndConversation(_ text: String) -> Bool {
         let t = text.lowercased()
         return t.contains("end conversation") || t.contains("stop session") || t.contains("结束对话") || t.contains("结束会话")
+    }
+
+    private func isLikelyMeaningfulTranscript(_ text: String, speechDuration: TimeInterval) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return false }
+
+        if speechDuration < 0.28 && trimmed.count < 4 {
+            return false
+        }
+
+        let letters = trimmed.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
+        let digits = trimmed.unicodeScalars.filter { CharacterSet.decimalDigits.contains($0) }.count
+        if letters + digits < 2 { return false }
+
+        let tokens = trimmed.split { $0 == " " || $0 == "\n" || $0 == "\t" }
+        if tokens.count == 1, trimmed.count <= 2 { return false }
+
+        return true
+    }
+
+    private func updateAdaptivePause(using text: String, speechDuration: TimeInterval) {
+        let words = max(1, text.split(separator: " ").count)
+        let wps = Double(words) / max(0.3, speechDuration)
+
+        let target: TimeInterval
+        if wps >= 2.8 {
+            target = 0.62
+        } else if wps >= 2.0 {
+            target = 0.75
+        } else if wps >= 1.4 {
+            target = 0.90
+        } else {
+            target = 1.05
+        }
+
+        adaptivePauseSeconds = max(0.55, min(1.15, 0.7 * adaptivePauseSeconds + 0.3 * target))
+    }
+
+    private func dynamicTurnEndSilence(for transcript: String) -> TimeInterval {
+        let lower = transcript.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let connectorEndings = ["and", "because", "but", "so", "if", "when", "i", "um", "uh"]
+        let trailingWord = lower.split(separator: " ").last.map(String.init) ?? ""
+
+        var threshold = adaptivePauseSeconds
+        if connectorEndings.contains(trailingWord) || lower.hasSuffix("...") {
+            threshold += 0.22
+        }
+        if lower.count < 8 {
+            threshold += 0.10
+        }
+
+        return max(0.55, min(1.30, threshold))
     }
 
     private func greetingMessage() -> String {

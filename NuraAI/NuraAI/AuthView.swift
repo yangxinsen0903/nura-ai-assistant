@@ -8,10 +8,17 @@ struct AuthView: View {
     @State private var isRegisterMode = false
     @State private var loading = false
     @State private var errorMessage: String?
+    @FocusState private var focusedField: Field?
+
+    private enum Field {
+        case email, password
+    }
 
     var body: some View {
         ZStack {
             CalmBackground()
+                .contentShape(Rectangle())
+                .onTapGesture { focusedField = nil }
 
             VStack(spacing: 20) {
                 Spacer()
@@ -29,12 +36,14 @@ struct AuthView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.emailAddress)
+                        .focused($focusedField, equals: .email)
                         .padding()
                         .background(.white.opacity(0.15))
                         .foregroundStyle(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
 
                     SecureField("Password", text: $password)
+                        .focused($focusedField, equals: .password)
                         .padding()
                         .background(.white.opacity(0.15))
                         .foregroundStyle(.white)

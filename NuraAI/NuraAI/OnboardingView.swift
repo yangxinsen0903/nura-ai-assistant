@@ -10,6 +10,12 @@ struct OnboardingView: View {
 
     @State private var loading = false
     @State private var errorMessage: String?
+    @FocusState private var focusedField: Field?
+
+    private enum Field {
+        case name
+        case occupation
+    }
 
     private let dateFormatter: DateFormatter = {
         let fmt = DateFormatter()
@@ -20,6 +26,8 @@ struct OnboardingView: View {
     var body: some View {
         ZStack {
             CalmBackground()
+                .contentShape(Rectangle())
+                .onTapGesture { focusedField = nil }
 
             VStack(alignment: .leading, spacing: 14) {
                 Text("Welcome to Nura.ai")
@@ -32,6 +40,7 @@ struct OnboardingView: View {
                 Group {
                     LabeledField(title: "Name") {
                         TextField("Your name", text: $name)
+                            .focused($focusedField, equals: .name)
                     }
 
                     LabeledField(title: "Date of Birth") {
@@ -41,6 +50,7 @@ struct OnboardingView: View {
 
                     LabeledField(title: "Job Occupation") {
                         TextField("e.g. Software Engineer", text: $occupation)
+                            .focused($focusedField, equals: .occupation)
                     }
 
                     Toggle("I currently have routine therapist treatment", isOn: $hasTherapistTreatment)
