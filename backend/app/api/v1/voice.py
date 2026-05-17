@@ -1,10 +1,43 @@
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from io import BytesIO
+import os
+import subprocess
+import tempfile
 
 from app.core.config import settings
 
 router = APIRouter(prefix="/voice", tags=["voice"])
+
+
+def _amplify_mp3(data: bytes, gain_db: float = 6.0) -> bytes:
+    """Amplify TTS audio to improve perceived loudness on iOS speaker output."""
+    in_path = None
+    out_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as in_file:
+            in_file.write(data)
+            in_path = in_file.name
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as out_file:
+            out_path = out_file.name
+
+        cmd = [
+            "ffmpeg", "-y", "-i", in_path,
+            "-af", f"volume={gain_db}dB",
+            "-codec:a", "libmp3lame", "-q:a", "3",
+            out_path,
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        with open(out_path, "rb") as f:
+            return f.read()
+    except Exception:
+        return data
+    finally:
+        if in_path and os.path.exists(in_path):
+            os.remove(in_path)
+        if out_path and os.path.exists(out_path):
+            os.remove(out_path)
 
 
 @router.post("/tts")
@@ -29,7 +62,8 @@ def tts(text: str = Form(...), style: str = Form("warm_female"), speed: float = 
             speed=safe_speed,
         )
         data = audio.read()
-        return StreamingResponse(BytesIO(data), media_type="audio/mpeg")
+        louder = _amplify_mp3(data, gain_db=6.0)
+        return StreamingResponse(BytesIO(louder), media_type="audio/mpeg")
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"TTS failed: {e}")
 
