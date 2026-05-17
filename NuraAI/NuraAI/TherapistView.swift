@@ -557,9 +557,11 @@ struct TherapistView: View {
         let session = AVAudioSession.sharedInstance()
         do {
             if isConversationActive {
-                try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth, .duckOthers])
+                // Prefer louder speaker output for hands-free assistant playback.
+                try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .allowAirPlay])
+                try session.overrideOutputAudioPort(.speaker)
             } else {
-                try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers, .allowBluetooth, .allowAirPlay])
+                try session.setCategory(.playback, mode: .spokenAudio, options: [.allowBluetooth, .allowAirPlay])
                 try session.overrideOutputAudioPort(.speaker)
             }
             try session.setActive(true)
@@ -588,6 +590,7 @@ struct TherapistView: View {
                 speed: speed
             )
             audioPlayer = try AVAudioPlayer(data: data)
+            audioPlayer?.volume = 1.0
             audioPlayer?.prepareToPlay()
 
             if isConversationActive {
