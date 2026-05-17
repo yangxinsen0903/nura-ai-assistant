@@ -829,13 +829,17 @@ private struct VoiceOrbView: View {
                     for i in 0..<9 {
                         let fi = Double(i)
                         let angle = t * (0.9 + fi * 0.08) * speed + fi * 0.7
-                        let radius = 26 + 18 * sin(t * 0.8 + fi)
+                        let radius = 26.0 + 18.0 * sin(t * 0.8 + fi)
                         let x = center.x + CGFloat(cos(angle) * radius)
                         let y = center.y + CGFloat(sin(angle * 1.2) * radius)
-                        let blobSize = CGFloat(34 + 18 * (0.5 + 0.5 * sin(t * 1.7 + fi * 1.3)))
+
+                        let wobble = sin(t * 1.7 + fi * 1.3)
+                        let blobSizeDouble = 34.0 + 18.0 * (0.5 + 0.5 * wobble)
+                        let blobSize = CGFloat(blobSizeDouble)
 
                         let rect = CGRect(x: x - blobSize / 2, y: y - blobSize / 2, width: blobSize, height: blobSize)
-                        let c = fi.truncatingRemainder(dividingBy: 2) < 1 ? palette.primary.opacity(0.45) : palette.secondary.opacity(0.40)
+                        let usePrimary = fi.truncatingRemainder(dividingBy: 2) < 1
+                        let c: Color = usePrimary ? palette.primary.opacity(0.45) : palette.secondary.opacity(0.40)
                         context.fill(Path(ellipseIn: rect), with: .color(c))
                     }
 
