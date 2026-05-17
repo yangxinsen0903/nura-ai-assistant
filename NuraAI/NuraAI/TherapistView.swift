@@ -798,67 +798,106 @@ private struct VoiceOrbView: View {
     let state: VoiceState
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 45.0, paused: false)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: false)) { timeline in
             let t = timeline.date.timeIntervalSinceReferenceDate
-            let pulse = 0.5 + 0.5 * sin(t * (state == .speaking ? 9.8 : state == .listening ? 6.0 : 2.4))
-            let flow = 0.5 + 0.5 * sin(t * 0.9)
-            let baseScale = state.scaleRange.lowerBound + (state.scaleRange.upperBound - state.scaleRange.lowerBound) * CGFloat(pulse)
+            let speed = state == .speaking ? 1.35 : (state == .listening ? 1.0 : 0.55)
+            let pulse = 0.5 + 0.5 * sin(t * 7.2 * speed)
+            let scale = state.scaleRange.lowerBound + (state.scaleRange.upperBound - state.scaleRange.lowerBound) * CGFloat(pulse)
+            let palette = colors(for: state)
 
             ZStack {
-                Circle()
-                    .fill(state.color.opacity(0.08 + 0.18 * flow))
-                    .frame(width: 230, height: 230)
-                    .blur(radius: 16)
-                    .scaleEffect(1.0 + 0.12 * CGFloat(flow))
-
-                Circle()
-                    .stroke(
-                        AngularGradient(
-                            colors: [.white.opacity(0.15), state.color.opacity(0.85), .white.opacity(0.10), state.color.opacity(0.65)],
-                            center: .center
-                        ),
-                        lineWidth: 3
-                    )
-                    .frame(width: 188, height: 188)
-                    .rotationEffect(.degrees(t * (state == .speaking ? 28 : 14)))
-                    .blur(radius: 0.4)
-                    .blendMode(.plusLighter)
-
-                ForEach(0..<2, id: \.self) { idx in
-                    let d = Double(idx)
-                    Circle()
-                        .trim(from: 0.08, to: 0.62)
-                        .stroke(state.color.opacity(0.28), style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                        .frame(width: 164 + CGFloat(idx) * 20, height: 164 + CGFloat(idx) * 20)
-                        .rotationEffect(.degrees((t * 42) + d * 170))
-                        .blur(radius: 0.6)
-                }
-
+                // Outer bloom halo
                 Circle()
                     .fill(
                         RadialGradient(
-                            colors: [
-                                .white.opacity(0.92),
-                                state.color.opacity(0.95),
-                                state.color.opacity(0.55),
-                                .clear
-                            ],
-                            center: UnitPoint(x: 0.42, y: 0.32),
-                            startRadius: 4,
-                            endRadius: 98
+                            colors: [palette.outer.opacity(0.45), .clear],
+                            center: .center,
+                            startRadius: 8,
+                            endRadius: 135
                         )
                     )
-                    .frame(width: 138, height: 138)
-                    .overlay {
-                        Circle()
-                            .stroke(.white.opacity(0.35), lineWidth: 1.1)
-                            .blur(radius: 0.3)
+                    .frame(width: 250, height: 250)
+                    .blur(radius: 20)
+                    .scaleEffect(1.0 + 0.08 * CGFloat(pulse))
+
+                // Fluid core (shader-like metaball feel using Canvas + additive blend)
+                Canvas { context, size in
+                    let center = CGPoint(x: size.width / 2, y: size.height / 2)
+                    context.addFilter(.blur(radius: 10))
+                    context.blendMode = .plusLighter
+
+                    for i in 0..<9 {
+                        let fi = Double(i)
+                        let angle = t * (0.9 + fi * 0.08) * speed + fi * 0.7
+                        let radius = 26 + 18 * sin(t * 0.8 + fi)
+                        let x = center.x + CGFloat(cos(angle) * radius)
+                        let y = center.y + CGFloat(sin(angle * 1.2) * radius)
+                        let blobSize = CGFloat(34 + 18 * (0.5 + 0.5 * sin(t * 1.7 + fi * 1.3)))
+
+                        let rect = CGRect(x: x - blobSize / 2, y: y - blobSize / 2, width: blobSize, height: blobSize)
+                        let c = fi.truncatingRemainder(dividingBy: 2) < 1 ? palette.primary.opacity(0.45) : palette.secondary.opacity(0.40)
+                        context.fill(Path(ellipseIn: rect), with: .color(c))
                     }
-                    .shadow(color: state.color.opacity(0.75), radius: 26, x: 0, y: 0)
-                    .scaleEffect(baseScale)
-                    .blendMode(.plusLighter)
+
+                    // central body
+                    context.fill(
+                        Path(ellipseIn: CGRect(x: center.x - 56, y: center.y - 56, width: 112, height: 112)),
+                        with: .radialGradient(
+                            Gradient(colors: [palette.highlight, palette.primary.opacity(0.9), palette.secondary.opacity(0.75), .clear]),
+                            center: center,
+                            startRadius: 2,
+                            endRadius: 70
+                        )
+                    )
+                }
+                .frame(width: 180, height: 180)
+                .scaleEffect(scale)
+
+                // Glass ring + moving specular highlight
+                Circle()
+                    .stroke(
+                        AngularGradient(
+                            colors: [palette.highlight.opacity(0.95), palette.primary.opacity(0.55), palette.secondary.opacity(0.75), palette.highlight.opacity(0.3)],
+                            center: .center,
+                            angle: .degrees(t * 30 * speed)
+                        ),
+                        lineWidth: 2.2
+                    )
+                    .frame(width: 154, height: 154)
+                    .blur(radius: 0.4)
+
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [palette.highlight.opacity(0.85), .clear],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 122, height: 122)
+                    .offset(x: -18 + 4 * CGFloat(sin(t * 1.2)), y: -22 + 4 * CGFloat(cos(t * 1.1)))
+                    .blendMode(.screen)
+                    .blur(radius: 1.3)
+
+                Circle()
+                    .stroke(palette.outer.opacity(0.24), lineWidth: 1.0)
+                    .frame(width: 186, height: 186)
+                    .scaleEffect(0.96 + 0.06 * CGFloat(0.5 + 0.5 * sin(t * 2.0 * speed)))
             }
             .compositingGroup()
+        }
+    }
+
+    private func colors(for state: VoiceState) -> (primary: Color, secondary: Color, highlight: Color, outer: Color) {
+        switch state {
+        case .idle:
+            return (.cyan.opacity(0.85), .blue.opacity(0.75), .white, .cyan)
+        case .listening:
+            return (.mint.opacity(0.92), .cyan.opacity(0.82), .white, .mint)
+        case .thinking:
+            return (.purple.opacity(0.9), .indigo.opacity(0.78), .white.opacity(0.95), .purple)
+        case .speaking:
+            return (.blue.opacity(0.9), .mint.opacity(0.82), .white, .cyan)
         }
     }
 }
