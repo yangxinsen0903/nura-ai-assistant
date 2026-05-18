@@ -10,8 +10,8 @@ from app.core.config import settings
 router = APIRouter(prefix="/voice", tags=["voice"])
 
 
-def _amplify_mp3(data: bytes, gain_db: float = 6.0) -> bytes:
-    """Amplify TTS audio to improve perceived loudness on iOS speaker output."""
+def _amplify_mp3(data: bytes, gain_db: float = 9.0) -> bytes:
+    """Amplify and normalize TTS audio to improve perceived loudness on iOS speaker output."""
     in_path = None
     out_path = None
     try:
@@ -21,10 +21,11 @@ def _amplify_mp3(data: bytes, gain_db: float = 6.0) -> bytes:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as out_file:
             out_path = out_file.name
 
+        af = f"loudnorm=I=-16:TP=-1.5:LRA=11,volume={gain_db}dB,alimiter=limit=0.95"
         cmd = [
             "ffmpeg", "-y", "-i", in_path,
-            "-af", f"volume={gain_db}dB",
-            "-codec:a", "libmp3lame", "-q:a", "3",
+            "-af", af,
+            "-codec:a", "libmp3lame", "-q:a", "2",
             out_path,
         ]
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -62,7 +63,7 @@ def tts(text: str = Form(...), style: str = Form("warm_female"), speed: float = 
             speed=safe_speed,
         )
         data = audio.read()
-        louder = _amplify_mp3(data, gain_db=6.0)
+        louder = _amplify_mp3(data, gain_db=9.0)
         return StreamingResponse(BytesIO(louder), media_type="audio/mpeg")
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"TTS failed: {e}")

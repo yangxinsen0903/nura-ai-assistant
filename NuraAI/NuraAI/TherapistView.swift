@@ -30,6 +30,7 @@ struct TherapistView: View {
     @State private var sessionTurnId = 0
     @State private var speechStartedAt: Date?
     @State private var adaptivePauseSeconds: TimeInterval = 0.78
+    @State private var idleGraceDeadline: Date?
 
     private let synth = AVSpeechSynthesizer()
     private let audioEngine = AVAudioEngine()
@@ -234,6 +235,7 @@ struct TherapistView: View {
             isConversationActive = true
             voiceOnlyMode = true
             voiceReplyEnabled = true // hands-free session always speaks back
+            idleGraceDeadline = nil
             sessionTurnId = 0
             scheduleIdleSessionTimeout()
             startSessionWatchdog()
@@ -294,6 +296,7 @@ struct TherapistView: View {
                 if rms > 0.008 {
                     DispatchQueue.main.async {
                         self.heardSpeechInTurn = true
+                        self.idleGraceDeadline = nil
                         if self.speechStartedAt == nil { self.speechStartedAt = Date() }
                         self.lastVoiceActivityAt = Date()
                     }
@@ -395,6 +398,7 @@ struct TherapistView: View {
         }
 
         updateAdaptivePause(using: text, speechDuration: speechDuration)
+        idleGraceDeadline = nil
 
         if shouldEndConversation(text) {
             await stopConversationSession(byVoiceCommand: true)
@@ -409,6 +413,7 @@ struct TherapistView: View {
         isConversationActive = false
         isRecording = false
         pendingTranscript = ""
+        idleGraceDeadline = nil
         idleSessionTask?.cancel()
         idleSessionTask = nil
         silenceWatcherTask?.cancel()
@@ -453,6 +458,18 @@ struct TherapistView: View {
                         return
                     }
 
+                    if !self.heardSpeechInTurn {
+                        if let deadline = self.idleGraceDeadline, Date() > deadline {
+                            Task { await self.stopConversationSession(byVoiceCommand: false) }
+                            return
+                        }
+
+                        if recordingAge > 5.0 && self.idleGraceDeadline == nil {
+                            Task { await self.handleIdlePrompt() }
+                            return
+                        }
+                    }
+
                     // self-heal when recognizer stalls in listening too long
                     if recordingAge > 7.0 {
                         if !self.pendingTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -470,6 +487,26 @@ struct TherapistView: View {
                     }
                 }
             }
+        }
+    }
+
+    @MainActor
+    private func handleIdlePrompt() async {
+        guard isConversationActive else { return }
+
+        isRecording = false
+        audioEngine.stop()
+        recognitionRequest?.endAudio()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        recognitionTask?.cancel()
+        recognitionTask = nil
+
+        await speakNatural("I’m still here. Tell me what you need help with.")
+
+        idleGraceDeadline = Date().addingTimeInterval(6)
+        if isConversationActive {
+            setVoiceState(.listening)
+            await startRecording()
         }
     }
 
