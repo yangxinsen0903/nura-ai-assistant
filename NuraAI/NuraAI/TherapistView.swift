@@ -469,16 +469,16 @@ struct TherapistView: View {
                     }
 
                     if !self.heardSpeechInTurn {
+                        if self.idlePromptActive || self.isIdlePromptSpeaking {
+                            return
+                        }
+
                         if let deadline = self.idleGraceDeadline, Date() > deadline {
                             if self.idlePromptCount >= 2 {
                                 Task { await self.stopConversationSession(byVoiceCommand: false) }
                             } else {
                                 Task { await self.handleIdlePrompt() }
                             }
-                            return
-                        }
-
-                        if self.idlePromptActive {
                             return
                         }
 
@@ -510,8 +510,9 @@ struct TherapistView: View {
 
     @MainActor
     private func handleIdlePrompt() async {
-        guard isConversationActive else { return }
+        guard isConversationActive, !idlePromptActive, !isIdlePromptSpeaking else { return }
 
+        idleGraceDeadline = nil
         isRecording = false
         audioEngine.stop()
         recognitionRequest?.endAudio()
