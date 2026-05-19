@@ -32,6 +32,8 @@ struct TherapistView: View {
     @State private var adaptivePauseSeconds: TimeInterval = 0.78
     @State private var idleGraceDeadline: Date?
     @State private var idlePromptActive = false
+    @State private var idlePromptCount = 0
+    @State private var isIdlePromptSpeaking = false
 
     private let synth = AVSpeechSynthesizer()
     private let audioEngine = AVAudioEngine()
@@ -238,6 +240,7 @@ struct TherapistView: View {
             voiceReplyEnabled = true // hands-free session always speaks back
             idleGraceDeadline = nil
             idlePromptActive = false
+            idlePromptCount = 0
             sessionTurnId = 0
             scheduleIdleSessionTimeout()
             startSessionWatchdog()
@@ -300,6 +303,7 @@ struct TherapistView: View {
                         self.heardSpeechInTurn = true
                         self.idleGraceDeadline = nil
                         self.idlePromptActive = false
+                        self.idlePromptCount = 0
                         if self.speechStartedAt == nil { self.speechStartedAt = Date() }
                         self.lastVoiceActivityAt = Date()
                     }
@@ -418,6 +422,8 @@ struct TherapistView: View {
         pendingTranscript = ""
         idleGraceDeadline = nil
         idlePromptActive = false
+        idlePromptCount = 0
+        isIdlePromptSpeaking = false
         idleSessionTask?.cancel()
         idleSessionTask = nil
         silenceWatcherTask?.cancel()
@@ -464,18 +470,19 @@ struct TherapistView: View {
 
                     if !self.heardSpeechInTurn {
                         if let deadline = self.idleGraceDeadline, Date() > deadline {
-                            Task { await self.stopConversationSession(byVoiceCommand: false) }
-                            return
-                        }
-
-                        if self.idlePromptActive {
-                            if recordingAge > 6.0 {
+                            if self.idlePromptCount >= 2 {
                                 Task { await self.stopConversationSession(byVoiceCommand: false) }
+                            } else {
+                                Task { await self.handleIdlePrompt() }
                             }
                             return
                         }
 
-                        if recordingAge > 5.0 {
+                        if self.idlePromptActive {
+                            return
+                        }
+
+                        if recordingAge > 5.0 && self.idlePromptCount == 0 {
                             Task { await self.handleIdlePrompt() }
                             return
                         }
@@ -513,9 +520,15 @@ struct TherapistView: View {
         recognitionTask = nil
 
         idlePromptActive = true
-        await speakNatural(idlePromptText())
+        isIdlePromptSpeaking = true
+        let round = idlePromptCount + 1
+        await speakNatural(idlePromptText(round: round))
+        isIdlePromptSpeaking = false
 
-        idleGraceDeadline = Date().addingTimeInterval(6)
+        idlePromptCount = round
+        idleGraceDeadline = Date().addingTimeInterval(5)
+        idlePromptActive = false
+
         if isConversationActive {
             setVoiceState(.listening)
             await startRecording()
@@ -602,13 +615,21 @@ struct TherapistView: View {
         return "Hi \(firstName), I’m Nura. How are you feeling right now?"
     }
 
-    private func idlePromptText() -> String {
+    private func idlePromptText(round: Int) -> String {
         let rawName = appState.profile?.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let firstName = rawName.split(separator: " ").first.map(String.init) ?? ""
-        if firstName.isEmpty {
-            return "Hey, still with me? I can keep going whenever you’re ready."
+
+        if round <= 1 {
+            if firstName.isEmpty {
+                return "Hey, still with me? I’m on standby — say anything and we’ll keep going."
+            }
+            return "Hey \(firstName), still with me? I’m on standby — say anything and we’ll keep going."
         }
-        return "Hey \(firstName), still with me? I’m on standby — say anything and we’ll keep going."
+
+        if firstName.isEmpty {
+            return "Last check — if you’d like to continue, just say a word now."
+        }
+        return "Last check, \(firstName) — if you’d like to continue, just say a word now."
     }
 
     private func configurePlaybackSession() {
@@ -743,7 +764,7 @@ struct TherapistView: View {
             let rms = sqrt(sum / Float(count))
             if rms > 0.020 {
                 DispatchQueue.main.async {
-                    guard self.isConversationActive, self.voiceState == .speaking, !self.bargeInTriggered else { return }
+                    guard self.isConversationActive, self.voiceState == .speaking, !self.bargeInTriggered, !self.isIdlePromptSpeaking else { return }
                     self.bargeInTriggered = true
                     self.audioPlayer?.stop()
                     self.audioPlayer = nil
