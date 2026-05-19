@@ -31,6 +31,7 @@ struct TherapistView: View {
     @State private var speechStartedAt: Date?
     @State private var adaptivePauseSeconds: TimeInterval = 0.78
     @State private var idleGraceDeadline: Date?
+    @State private var idlePromptActive = false
 
     private let synth = AVSpeechSynthesizer()
     private let audioEngine = AVAudioEngine()
@@ -236,6 +237,7 @@ struct TherapistView: View {
             voiceOnlyMode = true
             voiceReplyEnabled = true // hands-free session always speaks back
             idleGraceDeadline = nil
+            idlePromptActive = false
             sessionTurnId = 0
             scheduleIdleSessionTimeout()
             startSessionWatchdog()
@@ -297,6 +299,7 @@ struct TherapistView: View {
                     DispatchQueue.main.async {
                         self.heardSpeechInTurn = true
                         self.idleGraceDeadline = nil
+                        self.idlePromptActive = false
                         if self.speechStartedAt == nil { self.speechStartedAt = Date() }
                         self.lastVoiceActivityAt = Date()
                     }
@@ -414,6 +417,7 @@ struct TherapistView: View {
         isRecording = false
         pendingTranscript = ""
         idleGraceDeadline = nil
+        idlePromptActive = false
         idleSessionTask?.cancel()
         idleSessionTask = nil
         silenceWatcherTask?.cancel()
@@ -464,7 +468,14 @@ struct TherapistView: View {
                             return
                         }
 
-                        if recordingAge > 5.0 && self.idleGraceDeadline == nil {
+                        if self.idlePromptActive {
+                            if recordingAge > 6.0 {
+                                Task { await self.stopConversationSession(byVoiceCommand: false) }
+                            }
+                            return
+                        }
+
+                        if recordingAge > 5.0 {
                             Task { await self.handleIdlePrompt() }
                             return
                         }
@@ -501,7 +512,8 @@ struct TherapistView: View {
         recognitionTask?.cancel()
         recognitionTask = nil
 
-        await speakNatural("I’m still here. Tell me what you need help with.")
+        idlePromptActive = true
+        await speakNatural(idlePromptText())
 
         idleGraceDeadline = Date().addingTimeInterval(6)
         if isConversationActive {
@@ -588,6 +600,15 @@ struct TherapistView: View {
             return "Hi, I’m Nura. How are you feeling right now?"
         }
         return "Hi \(firstName), I’m Nura. How are you feeling right now?"
+    }
+
+    private func idlePromptText() -> String {
+        let rawName = appState.profile?.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let firstName = rawName.split(separator: " ").first.map(String.init) ?? ""
+        if firstName.isEmpty {
+            return "Hey, still with me? I can keep going whenever you’re ready."
+        }
+        return "Hey \(firstName), still with me? I’m on standby — say anything and we’ll keep going."
     }
 
     private func configurePlaybackSession() {
