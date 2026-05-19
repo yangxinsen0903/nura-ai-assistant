@@ -530,6 +530,11 @@ struct TherapistView: View {
         idlePromptActive = false
 
         if isConversationActive {
+            heardSpeechInTurn = false
+            speechStartedAt = nil
+            pendingTranscript = ""
+            recordingStartedAt = Date()
+            lastVoiceActivityAt = Date()
             setVoiceState(.listening)
             await startRecording()
         }
@@ -672,10 +677,6 @@ struct TherapistView: View {
             audioPlayer?.volume = 1.0
             audioPlayer?.prepareToPlay()
 
-            if isConversationActive {
-                startBargeInMonitor()
-            }
-
             let started = audioPlayer?.play() ?? false
             guard started else {
                 throw NSError(domain: "NuraVoice", code: -1001, userInfo: [NSLocalizedDescriptionKey: "TTS audio could not start playback"])
@@ -685,8 +686,6 @@ struct TherapistView: View {
                 if bargeInTriggered { break }
                 try? await Task.sleep(nanoseconds: 120_000_000)
             }
-            stopBargeInMonitor()
-
             if bargeInTriggered {
                 return
             }
@@ -701,9 +700,6 @@ struct TherapistView: View {
     private func speakFallback(_ text: String, speed: Double = 0.9) async {
         setVoiceState(.speaking)
         bargeInTriggered = false
-        if isConversationActive {
-            startBargeInMonitor()
-        }
 
         synth.stopSpeaking(at: .immediate)
         let utterance = AVSpeechUtterance(string: text)
@@ -714,8 +710,6 @@ struct TherapistView: View {
 
         let estimated = estimatedSpeechDuration(text: text, speed: speed)
         try? await Task.sleep(nanoseconds: UInt64(max(0.9, estimated) * 1_000_000_000))
-        stopBargeInMonitor()
-
         if bargeInTriggered { return }
         if !isRecording { setVoiceState(.idle) }
     }
@@ -799,6 +793,7 @@ struct TherapistView: View {
                 if Task.isCancelled { return }
                 await MainActor.run {
                     guard self.isConversationActive else { return }
+                    if self.idlePromptActive { return }
 
                     let stalledFor = Date().timeIntervalSince(self.lastStateTransitionAt)
                     if self.voiceState == .listening && !self.isRecording {
