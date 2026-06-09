@@ -42,7 +42,12 @@ def _amplify_mp3(data: bytes, gain_db: float = 9.0) -> bytes:
 
 
 @router.post("/tts")
-def tts(text: str = Form(...), style: str = Form("warm_female"), speed: float = Form(0.9)):
+def tts(
+    text: str = Form(...),
+    style: str = Form("warm_female"),
+    speed: float = Form(0.9),
+    gain_db: float = Form(9.0),
+):
     if not settings.openai_api_key:
         raise HTTPException(status_code=503, detail="TTS unavailable")
 
@@ -63,7 +68,8 @@ def tts(text: str = Form(...), style: str = Form("warm_female"), speed: float = 
             speed=safe_speed,
         )
         data = audio.read()
-        louder = _amplify_mp3(data, gain_db=9.0)
+        safe_gain = max(0.0, min(12.0, gain_db))
+        louder = _amplify_mp3(data, gain_db=safe_gain)
         return StreamingResponse(BytesIO(louder), media_type="audio/mpeg")
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"TTS failed: {e}")

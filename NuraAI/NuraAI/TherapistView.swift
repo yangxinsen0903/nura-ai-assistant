@@ -30,6 +30,7 @@ struct TherapistView: View {
     @State private var sessionTurnId = 0
     @State private var speechStartedAt: Date?
     @State private var adaptivePauseSeconds: TimeInterval = 0.78
+    @State private var lastTranscriptChangeAt = Date()
     @State private var idleGraceDeadline: Date?
     @State private var idlePromptActive = false
     @State private var idlePromptCount = 0
@@ -319,12 +320,16 @@ struct TherapistView: View {
             speechStartedAt = nil
             lastVoiceActivityAt = Date()
             recordingStartedAt = Date()
+            lastTranscriptChangeAt = Date()
             startSilenceWatcher()
 
             recognitionTask = recognizer.recognitionTask(with: request) { result, error in
                 if let result = result {
                     DispatchQueue.main.async {
                         let transcript = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if transcript != self.pendingTranscript {
+                            self.lastTranscriptChangeAt = Date()
+                        }
                         self.pendingTranscript = transcript
                         self.scheduleIdleSessionTimeout()
                         if result.isFinal {
@@ -459,11 +464,13 @@ struct TherapistView: View {
                 if Task.isCancelled { return }
                 await MainActor.run {
                     guard self.isConversationActive, self.isRecording, !self.sending else { return }
-                    let silentFor = Date().timeIntervalSince(self.lastVoiceActivityAt)
-                    let recordingAge = Date().timeIntervalSince(self.recordingStartedAt)
+                    let now = Date()
+                    let silentFor = now.timeIntervalSince(self.lastVoiceActivityAt)
+                    let recordingAge = now.timeIntervalSince(self.recordingStartedAt)
                     let endSilence = self.dynamicTurnEndSilence(for: self.pendingTranscript)
+                    let transcriptStableFor = now.timeIntervalSince(self.lastTranscriptChangeAt)
 
-                    if self.heardSpeechInTurn && silentFor > endSilence {
+                    if self.heardSpeechInTurn && silentFor > endSilence && transcriptStableFor > 0.35 {
                         Task { await self.finalizeCurrentUtterance() }
                         return
                     }
@@ -523,7 +530,7 @@ struct TherapistView: View {
         idlePromptActive = true
         isIdlePromptSpeaking = true
         let round = idlePromptCount + 1
-        await speakNatural(idlePromptText(round: round))
+        await speakNatural(idlePromptText(round: round), gainDb: 11.0)
         isIdlePromptSpeaking = false
 
         idlePromptCount = round
@@ -536,6 +543,7 @@ struct TherapistView: View {
             pendingTranscript = ""
             recordingStartedAt = Date()
             lastVoiceActivityAt = Date()
+            lastTranscriptChangeAt = Date()
             setVoiceState(.listening)
             await startRecording()
         }
@@ -662,7 +670,7 @@ struct TherapistView: View {
     }
 
     @MainActor
-    private func speakNatural(_ text: String, emotion: String = "neutral", riskLevel: String = "low") async {
+    private func speakNatural(_ text: String, emotion: String = "neutral", riskLevel: String = "low", gainDb: Double = 9.0) async {
         configurePlaybackSession()
         setVoiceState(.speaking)
         bargeInTriggered = false
@@ -672,7 +680,8 @@ struct TherapistView: View {
                 baseURL: appState.apiBaseURL,
                 text: text,
                 style: "warm_female",
-                speed: speed
+                speed: speed,
+                gainDb: gainDb
             )
             audioPlayer = try AVAudioPlayer(data: data)
             audioPlayer?.volume = 1.0
