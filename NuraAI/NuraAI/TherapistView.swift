@@ -530,7 +530,7 @@ struct TherapistView: View {
         idlePromptActive = true
         isIdlePromptSpeaking = true
         let round = idlePromptCount + 1
-        await speakNatural(idlePromptText(round: round), gainDb: 11.0)
+        await speakNatural(idlePromptText(round: round), gainDb: 11.0, preferLoudSpeaker: true)
         isIdlePromptSpeaking = false
 
         idlePromptCount = round
@@ -646,11 +646,14 @@ struct TherapistView: View {
         return "Last check, \(firstName) — if you’d like to continue, just say a word now."
     }
 
-    private func configurePlaybackSession() {
+    private func configurePlaybackSession(preferLoudSpeaker: Bool = false) {
         let session = AVAudioSession.sharedInstance()
         do {
-            if isConversationActive {
-                // Prefer louder speaker output for hands-free assistant playback.
+            if preferLoudSpeaker {
+                try session.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowAirPlay])
+                try session.overrideOutputAudioPort(.speaker)
+            } else if isConversationActive {
+                // Keep duplex behavior in active conversation.
                 try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .allowAirPlay])
                 try session.overrideOutputAudioPort(.speaker)
             } else {
@@ -670,8 +673,8 @@ struct TherapistView: View {
     }
 
     @MainActor
-    private func speakNatural(_ text: String, emotion: String = "neutral", riskLevel: String = "low", gainDb: Double = 9.0) async {
-        configurePlaybackSession()
+    private func speakNatural(_ text: String, emotion: String = "neutral", riskLevel: String = "low", gainDb: Double = 9.0, preferLoudSpeaker: Bool = false) async {
+        configurePlaybackSession(preferLoudSpeaker: preferLoudSpeaker)
         setVoiceState(.speaking)
         bargeInTriggered = false
         let speed = speechSpeed(emotion: emotion, riskLevel: riskLevel)
@@ -711,10 +714,12 @@ struct TherapistView: View {
         setVoiceState(.speaking)
         bargeInTriggered = false
 
+        configurePlaybackSession(preferLoudSpeaker: true)
         synth.stopSpeaking(at: .immediate)
         let utterance = AVSpeechUtterance(string: text)
         utterance.rate = Float(max(0.38, min(0.50, speed * 0.50)))
         utterance.pitchMultiplier = 1.0
+        utterance.volume = 1.0
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         synth.speak(utterance)
 
