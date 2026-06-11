@@ -21,7 +21,8 @@ def _amplify_mp3(data: bytes, gain_db: float = 9.0) -> bytes:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as out_file:
             out_path = out_file.name
 
-        af = f"loudnorm=I=-16:TP=-1.5:LRA=11,volume={gain_db}dB,alimiter=limit=0.95"
+        # loudnorm can under-shoot on very short utterances; dynaudnorm is more stable for prompts.
+        af = f"dynaudnorm=f=180:g=25,volume={gain_db}dB,alimiter=limit=0.97"
         cmd = [
             "ffmpeg", "-y", "-i", in_path,
             "-af", af,
@@ -69,6 +70,12 @@ def tts(
         )
         data = audio.read()
         safe_gain = max(0.0, min(12.0, gain_db))
+
+        # Boost short prompts slightly to match long assistant replies in perceived loudness.
+        word_count = len(text.strip().split())
+        if word_count <= 14:
+            safe_gain = min(12.0, safe_gain + 2.0)
+
         louder = _amplify_mp3(data, gain_db=safe_gain)
         return StreamingResponse(BytesIO(louder), media_type="audio/mpeg")
     except Exception as e:  # noqa: BLE001
