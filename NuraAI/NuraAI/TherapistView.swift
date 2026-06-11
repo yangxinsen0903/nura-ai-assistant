@@ -678,7 +678,8 @@ struct TherapistView: View {
         setVoiceState(.speaking)
         bargeInTriggered = false
         let speed = speechSpeed(emotion: emotion, riskLevel: riskLevel)
-        do {
+
+        func playCloudTTS() async throws {
             let data = try await APIClient.shared.synthesizeSpeech(
                 baseURL: appState.apiBaseURL,
                 text: text,
@@ -699,13 +700,25 @@ struct TherapistView: View {
                 if bargeInTriggered { break }
                 try? await Task.sleep(nanoseconds: 120_000_000)
             }
-            if bargeInTriggered {
-                return
-            }
+        }
+
+        do {
+            try await playCloudTTS()
+            if bargeInTriggered { return }
             if !isRecording { setVoiceState(.idle) }
+            return
+        } catch is CancellationError {
+            return
         } catch {
-            stopBargeInMonitor()
-            await speakFallback(text, speed: speed)
+            // Retry once before falling back to system speech (which sounds much quieter).
+            do {
+                try await playCloudTTS()
+                if bargeInTriggered { return }
+                if !isRecording { setVoiceState(.idle) }
+                return
+            } catch {
+                await speakFallback(text, speed: speed)
+            }
         }
     }
 
