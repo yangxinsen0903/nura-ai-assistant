@@ -5,6 +5,7 @@ from app.api.v1.chat import router as chat_router
 from app.api.v1.content import router as content_router
 from app.api.v1.emotion import router as emotion_router
 from app.api.v1.health import router as health_router
+from app.api.v1.realtime import router as realtime_router
 from app.api.v1.user import router as user_router
 from app.api.v1.voice import router as voice_router
 from app.core.config import settings
@@ -22,4 +23,5 @@ app.include_router(chat_router, prefix=settings.api_v1_prefix)
 app.include_router(emotion_router, prefix=settings.api_v1_prefix)
 app.include_router(user_router, prefix=settings.api_v1_prefix)
 app.include_router(content_router, prefix=settings.api_v1_prefix)
+app.include_router(realtime_router, prefix=settings.api_v1_prefix)
 app.include_router(voice_router, prefix=settings.api_v1_prefix)

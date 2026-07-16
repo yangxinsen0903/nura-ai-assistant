@@ -1,48 +1,28 @@
-import SwiftUI
 import AVFoundation
-import Speech
+import SwiftUI
 import UIKit
 
 struct TherapistView: View {
     @EnvironmentObject private var appState: AppState
+    @StateObject private var rt = RealtimeSession()
 
     @State private var messages: [LocalMessage] = []
     @State private var input = ""
     @State private var sending = false
-    @State private var voiceReplyEnabled = true
     @State private var voiceOnlyMode = false
-    @State private var isRecording = false
     @State private var activeMode: String = "chat"
-
-    @State private var voiceState: VoiceState = .idle
     @State private var alertMessage: String?
-    @State private var isConversationActive = false
-    @State private var pendingTranscript = ""
-    @State private var idleSessionTask: Task<Void, Never>?
-    @State private var silenceWatcherTask: Task<Void, Never>?
-    @State private var sessionWatchdogTask: Task<Void, Never>?
-    @State private var bargeInMonitorTask: Task<Void, Never>?
-    @State private var bargeInTriggered = false
-    @State private var heardSpeechInTurn = false
-    @State private var lastVoiceActivityAt = Date()
-    @State private var recordingStartedAt = Date()
-    @State private var lastStateTransitionAt = Date()
-    @State private var sessionTurnId = 0
-    @State private var speechStartedAt: Date?
-    @State private var adaptivePauseSeconds: TimeInterval = 0.78
-    @State private var lastTranscriptChangeAt = Date()
-    @State private var idleGraceDeadline: Date?
-    @State private var idlePromptActive = false
-    @State private var idlePromptCount = 0
-    @State private var isIdlePromptSpeaking = false
 
-    private let synth = AVSpeechSynthesizer()
-    private let audioEngine = AVAudioEngine()
-    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
-    @State private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
-    @State private var recognitionTask: SFSpeechRecognitionTask?
+    private var isConversationActive: Bool { rt.rtState != .disconnected }
 
-    @State private var audioPlayer: AVAudioPlayer?
+    private var voiceState: VoiceState {
+        switch rt.rtState {
+        case .disconnected, .connecting: return .idle
+        case .listening:                 return .listening
+        case .thinking:                  return .thinking
+        case .speaking:                  return .speaking
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -54,7 +34,8 @@ struct TherapistView: View {
                         HStack {
                             Spacer()
                             Button {
-                                Task { await stopConversationSession(byVoiceCommand: false) }
+                                rt.disconnect()
+                                voiceOnlyMode = false
                             } label: {
                                 Image(systemName: "xmark.circle.fill")
                                     .font(.system(size: 30))
@@ -92,7 +73,7 @@ struct TherapistView: View {
 
                     if !voiceOnlyMode {
                         HStack(spacing: 8) {
-                            TextField("Share what’s on your mind...", text: $input, axis: .vertical)
+                            TextField("Share what's on your mind...", text: $input, axis: .vertical)
                                 .padding(10)
                                 .background(.white.opacity(0.15))
                                 .foregroundStyle(.white)
@@ -106,9 +87,7 @@ struct TherapistView: View {
                             .foregroundStyle(.black)
                             .disabled(sending || input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-                            Button {
-                                Task { await toggleRecording() }
-                            } label: {
+                            Button { toggleConversation() } label: {
                                 Image(systemName: "waveform.circle.fill")
                                     .font(.system(size: 30))
                                     .foregroundStyle(.white)
@@ -127,11 +106,18 @@ struct TherapistView: View {
                 }
             }
             .onAppear {
-                configurePlaybackSession()
-                requestSpeechPermission()
                 if messages.isEmpty {
                     messages.append(LocalMessage(role: "assistant", content: greetingMessage()))
                 }
+                rt.onUserTranscript = { transcript in
+                    messages.append(LocalMessage(role: "user", content: transcript))
+                }
+                rt.onAssistantMessage = { reply in
+                    messages.append(LocalMessage(role: "assistant", content: reply))
+                }
+            }
+            .onChange(of: rt.rtState) { _, newState in
+                if newState == .disconnected { voiceOnlyMode = false }
             }
             .alert("Voice Error", isPresented: Binding(
                 get: { alertMessage != nil },
@@ -144,717 +130,53 @@ struct TherapistView: View {
         }
     }
 
-    @MainActor
-    private func sendText() async {
-        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        input = ""
-        await sendUserMessage(text)
+    // MARK: - Actions
+
+    private func toggleConversation() {
+        if isConversationActive {
+            rt.disconnect()
+            voiceOnlyMode = false
+        } else {
+            voiceOnlyMode = true
+            let rawName = appState.profile?.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let firstName = rawName.split(separator: " ").first.map(String.init) ?? ""
+            rt.connect(apiBaseURL: appState.apiBaseURL, firstName: firstName)
+        }
     }
 
     @MainActor
-    private func sendUserMessage(_ text: String, fromHandsFree: Bool = false) async {
-        guard let userId = appState.userId, !text.isEmpty else { return }
-
-        if fromHandsFree && text.count < 2 {
-            if isConversationActive { await startRecording() }
-            return
-        }
-
-        if !voiceOnlyMode {
-            messages.append(LocalMessage(role: "user", content: text))
-        }
-        sessionTurnId += 1
-        let turnId = sessionTurnId
-
+    private func sendText() async {
+        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        input = ""
+        messages.append(LocalMessage(role: "user", content: text))
         sending = true
-        setVoiceState(.thinking)
-        var shouldResumeHandsFree = false
+        defer { sending = false }
 
+        guard let userId = appState.userId else { return }
         do {
             let resp = try await APIClient.shared.sendMessage(
                 baseURL: appState.apiBaseURL,
                 userId: userId,
                 content: text,
                 mode: activeMode,
-                source: fromHandsFree ? "voice" : "text"
+                source: "text"
             )
-            if turnId != sessionTurnId { return }
             activeMode = resp.mode
-
-            if !voiceOnlyMode {
-                messages.append(LocalMessage(role: "assistant", content: resp.reply))
-            }
-            if voiceReplyEnabled {
-                await speakNatural(resp.reply, emotion: resp.emotion, riskLevel: resp.risk_level)
-            }
+            messages.append(LocalMessage(role: "assistant", content: resp.reply))
         } catch {
-            let detail = error.localizedDescription
-            let lowered = detail.lowercased()
-            let ns = error as NSError
-            if error is CancellationError || lowered.contains("cancel") || ns.code == NSURLErrorCancelled {
-                sending = false
-                if fromHandsFree && isConversationActive {
-                    setVoiceState(.listening)
-                    await startRecording()
-                } else if !isRecording {
-                    setVoiceState(.idle)
-                }
-                return
-            }
-
-            let fallback = "I’m having trouble reaching the server right now. Please try again."
-            if !voiceOnlyMode {
-                messages.append(LocalMessage(role: "assistant", content: "\(fallback) (\(detail))"))
-            }
-            alertMessage = "Send failed: \(detail)"
-            if voiceReplyEnabled {
-                await speakNatural(fallback)
-            }
+            let msg = "I'm having trouble reaching the server. (\(error.localizedDescription))"
+            messages.append(LocalMessage(role: "assistant", content: msg))
         }
-
-        scheduleIdleSessionTimeout()
-        if fromHandsFree && isConversationActive {
-            shouldResumeHandsFree = true
-        }
-
-        sending = false
-        if shouldResumeHandsFree && isConversationActive {
-            setVoiceState(.listening)
-            await startRecording()
-        } else if !isRecording {
-            setVoiceState(.idle)
-        }
-    }
-
-    private func requestSpeechPermission() {
-        SFSpeechRecognizer.requestAuthorization { _ in }
-        AVAudioSession.sharedInstance().requestRecordPermission { _ in }
-    }
-
-    @MainActor
-    private func toggleRecording() async {
-        if isConversationActive {
-            await stopConversationSession(byVoiceCommand: false)
-        } else {
-            isConversationActive = true
-            voiceOnlyMode = true
-            voiceReplyEnabled = true // hands-free session always speaks back
-            idleGraceDeadline = nil
-            idlePromptActive = false
-            idlePromptCount = 0
-            sessionTurnId = 0
-            scheduleIdleSessionTimeout()
-            startSessionWatchdog()
-            await startRecording()
-        }
-    }
-
-    @MainActor
-    private func startRecording() async {
-        if isRecording || sending { return }
-
-        guard let recognizer, recognizer.isAvailable else {
-            alertMessage = "Speech recognizer is currently unavailable."
-            return
-        }
-
-        if SFSpeechRecognizer.authorizationStatus() != .authorized {
-            alertMessage = "Please allow Speech Recognition in Settings."
-            return
-        }
-
-        let micAllowed = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            AVAudioSession.sharedInstance().requestRecordPermission { granted in
-                continuation.resume(returning: granted)
-            }
-        }
-        guard micAllowed else {
-            alertMessage = "Please allow Microphone access in Settings."
-            return
-        }
-
-        do {
-            try configureRecordSession()
-            audioPlayer?.stop()
-            synth.stopSpeaking(at: .immediate)
-
-            recognitionTask?.cancel()
-            recognitionTask = nil
-
-            let request = SFSpeechAudioBufferRecognitionRequest()
-            recognitionRequest = request
-            request.shouldReportPartialResults = true
-            request.taskHint = .dictation
-
-            let inputNode = audioEngine.inputNode
-            let recordingFormat = inputNode.outputFormat(forBus: 0)
-            inputNode.removeTap(onBus: 0)
-            inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
-                request.append(buffer)
-
-                // basic energy-based VAD for hands-free turn end
-                guard let channel = buffer.floatChannelData?[0] else { return }
-                let count = Int(buffer.frameLength)
-                if count <= 0 { return }
-                var sum: Float = 0
-                for i in 0..<count { sum += channel[i] * channel[i] }
-                let rms = sqrt(sum / Float(count))
-                if rms > 0.008 {
-                    DispatchQueue.main.async {
-                        self.heardSpeechInTurn = true
-                        self.idleGraceDeadline = nil
-                        self.idlePromptActive = false
-                        self.idlePromptCount = 0
-                        if self.speechStartedAt == nil { self.speechStartedAt = Date() }
-                        self.lastVoiceActivityAt = Date()
-                    }
-                }
-            }
-
-            audioEngine.prepare()
-            try audioEngine.start()
-            isRecording = true
-            voiceOnlyMode = true
-            setVoiceState(.listening)
-            heardSpeechInTurn = false
-            speechStartedAt = nil
-            lastVoiceActivityAt = Date()
-            recordingStartedAt = Date()
-            lastTranscriptChangeAt = Date()
-            startSilenceWatcher()
-
-            recognitionTask = recognizer.recognitionTask(with: request) { result, error in
-                if let result = result {
-                    DispatchQueue.main.async {
-                        let transcript = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if transcript != self.pendingTranscript {
-                            self.lastTranscriptChangeAt = Date()
-                        }
-                        self.pendingTranscript = transcript
-                        self.scheduleIdleSessionTimeout()
-                        if result.isFinal {
-                            Task { await self.finalizeCurrentUtterance() }
-                        }
-                    }
-                }
-                if let error {
-                    DispatchQueue.main.async {
-                        let msg = error.localizedDescription.lowercased()
-                        self.isRecording = false
-                        self.audioEngine.stop()
-                        self.audioEngine.inputNode.removeTap(onBus: 0)
-
-                        if msg.contains("cancel") {
-                            if self.isConversationActive {
-                                Task { await self.startRecording() }
-                            }
-                            return
-                        }
-
-                        if msg.contains("no speech") || msg.contains("no speech detected") {
-                            self.setVoiceState(.listening)
-                            if self.isConversationActive {
-                                Task { await self.startRecording() }
-                            } else {
-                                self.setVoiceState(.idle)
-                            }
-                            return
-                        }
-
-                        self.setVoiceState(.idle)
-                        self.alertMessage = "Voice input failed: \(error.localizedDescription)"
-                    }
-                }
-            }
-        } catch {
-            isRecording = false
-            setVoiceState(.idle)
-            alertMessage = "Could not start recording: \(error.localizedDescription)"
-        }
-    }
-
-    @MainActor
-    private func finalizeCurrentUtterance() async {
-        guard isRecording || !(pendingTranscript.isEmpty) else { return }
-
-        silenceWatcherTask?.cancel()
-        silenceWatcherTask = nil
-
-        let text = pendingTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-        pendingTranscript = ""
-
-        let speechDuration = max(0, Date().timeIntervalSince(speechStartedAt ?? recordingStartedAt))
-
-        isRecording = false
-        setVoiceState(.thinking)
-        audioEngine.stop()
-        recognitionRequest?.endAudio()
-        audioEngine.inputNode.removeTap(onBus: 0)
-        recognitionTask?.cancel()
-        recognitionTask = nil
-
-        if text.isEmpty {
-            if isConversationActive {
-                setVoiceState(.listening)
-                await startRecording()
-            }
-            return
-        }
-
-        if !isLikelyMeaningfulTranscript(text, speechDuration: speechDuration) {
-            if isConversationActive {
-                setVoiceState(.listening)
-                await startRecording()
-            }
-            return
-        }
-
-        updateAdaptivePause(using: text, speechDuration: speechDuration)
-        idleGraceDeadline = nil
-
-        if shouldEndConversation(text) {
-            await stopConversationSession(byVoiceCommand: true)
-            return
-        }
-
-        await sendUserMessage(text, fromHandsFree: true)
-    }
-
-    @MainActor
-    private func stopConversationSession(byVoiceCommand: Bool) async {
-        isConversationActive = false
-        isRecording = false
-        pendingTranscript = ""
-        idleGraceDeadline = nil
-        idlePromptActive = false
-        idlePromptCount = 0
-        isIdlePromptSpeaking = false
-        idleSessionTask?.cancel()
-        idleSessionTask = nil
-        silenceWatcherTask?.cancel()
-        silenceWatcherTask = nil
-        sessionWatchdogTask?.cancel()
-        sessionWatchdogTask = nil
-        stopBargeInMonitor()
-
-        audioEngine.stop()
-        recognitionRequest?.endAudio()
-        audioEngine.inputNode.removeTap(onBus: 0)
-        recognitionTask?.cancel()
-        recognitionTask = nil
-
-        audioPlayer?.stop()
-        audioPlayer = nil
-        synth.stopSpeaking(at: .immediate)
-
-        setVoiceState(.idle)
-        voiceOnlyMode = false
-
-        if byVoiceCommand {
-            messages.append(LocalMessage(role: "assistant", content: "Session ended. I’m here whenever you want to continue."))
-        }
-    }
-
-    @MainActor
-    private func startSilenceWatcher() {
-        silenceWatcherTask?.cancel()
-        silenceWatcherTask = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 250_000_000)
-                if Task.isCancelled { return }
-                await MainActor.run {
-                    guard self.isConversationActive, self.isRecording, !self.sending else { return }
-                    let now = Date()
-                    let silentFor = now.timeIntervalSince(self.lastVoiceActivityAt)
-                    let recordingAge = now.timeIntervalSince(self.recordingStartedAt)
-                    let endSilence = self.dynamicTurnEndSilence(for: self.pendingTranscript)
-                    let transcriptStableFor = now.timeIntervalSince(self.lastTranscriptChangeAt)
-
-                    if self.heardSpeechInTurn && silentFor > endSilence && transcriptStableFor > 0.35 {
-                        Task { await self.finalizeCurrentUtterance() }
-                        return
-                    }
-
-                    if !self.heardSpeechInTurn {
-                        if self.idlePromptActive || self.isIdlePromptSpeaking {
-                            return
-                        }
-
-                        if let deadline = self.idleGraceDeadline, Date() > deadline {
-                            if self.idlePromptCount >= 2 {
-                                Task { await self.stopConversationSession(byVoiceCommand: false) }
-                            } else {
-                                Task { await self.handleIdlePrompt() }
-                            }
-                            return
-                        }
-
-                        if recordingAge > 5.0 && self.idlePromptCount == 0 {
-                            Task { await self.handleIdlePrompt() }
-                            return
-                        }
-                    }
-
-                    // self-heal when recognizer stalls in listening too long
-                    if recordingAge > 7.0 {
-                        if !self.pendingTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            Task { await self.finalizeCurrentUtterance() }
-                        } else {
-                            self.isRecording = false
-                            self.audioEngine.stop()
-                            self.audioEngine.inputNode.removeTap(onBus: 0)
-                            self.recognitionRequest?.endAudio()
-                            self.recognitionTask?.cancel()
-                            self.recognitionTask = nil
-                            self.setVoiceState(.listening)
-                            Task { await self.startRecording() }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    @MainActor
-    private func handleIdlePrompt() async {
-        guard isConversationActive, !idlePromptActive, !isIdlePromptSpeaking else { return }
-
-        idleGraceDeadline = nil
-        isRecording = false
-        audioEngine.stop()
-        recognitionRequest?.endAudio()
-        audioEngine.inputNode.removeTap(onBus: 0)
-        recognitionTask?.cancel()
-        recognitionTask = nil
-
-        idlePromptActive = true
-        isIdlePromptSpeaking = true
-        let round = idlePromptCount + 1
-        await speakNatural(idlePromptText(round: round), gainDb: 11.0, preferLoudSpeaker: true)
-        isIdlePromptSpeaking = false
-
-        idlePromptCount = round
-        idleGraceDeadline = Date().addingTimeInterval(5)
-        idlePromptActive = false
-
-        if isConversationActive {
-            heardSpeechInTurn = false
-            speechStartedAt = nil
-            pendingTranscript = ""
-            recordingStartedAt = Date()
-            lastVoiceActivityAt = Date()
-            lastTranscriptChangeAt = Date()
-            setVoiceState(.listening)
-            await startRecording()
-        }
-    }
-
-    @MainActor
-    private func scheduleIdleSessionTimeout() {
-        idleSessionTask?.cancel()
-        idleSessionTask = Task {
-            try? await Task.sleep(nanoseconds: 240_000_000_000)
-            if Task.isCancelled { return }
-            await MainActor.run {
-                if self.isConversationActive && !self.isRecording && !self.sending {
-                    Task { await self.stopConversationSession(byVoiceCommand: false) }
-                }
-            }
-        }
-    }
-
-    private func shouldEndConversation(_ text: String) -> Bool {
-        let t = text.lowercased()
-        return t.contains("end conversation") || t.contains("stop session") || t.contains("结束对话") || t.contains("结束会话")
-    }
-
-    private func isLikelyMeaningfulTranscript(_ text: String, speechDuration: TimeInterval) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return false }
-
-        if speechDuration < 0.28 && trimmed.count < 4 {
-            return false
-        }
-
-        let letters = trimmed.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
-        let digits = trimmed.unicodeScalars.filter { CharacterSet.decimalDigits.contains($0) }.count
-        if letters + digits < 2 { return false }
-
-        let tokens = trimmed.split { $0 == " " || $0 == "\n" || $0 == "\t" }
-        if tokens.count == 1, trimmed.count <= 2 { return false }
-
-        return true
-    }
-
-    private func updateAdaptivePause(using text: String, speechDuration: TimeInterval) {
-        let words = max(1, text.split(separator: " ").count)
-        let wps = Double(words) / max(0.3, speechDuration)
-
-        let target: TimeInterval
-        if wps >= 2.8 {
-            target = 0.62
-        } else if wps >= 2.0 {
-            target = 0.75
-        } else if wps >= 1.4 {
-            target = 0.90
-        } else {
-            target = 1.05
-        }
-
-        adaptivePauseSeconds = max(0.55, min(1.15, 0.7 * adaptivePauseSeconds + 0.3 * target))
-    }
-
-    private func dynamicTurnEndSilence(for transcript: String) -> TimeInterval {
-        let lower = transcript.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        let connectorEndings = ["and", "because", "but", "so", "if", "when", "i", "um", "uh"]
-        let trailingWord = lower.split(separator: " ").last.map(String.init) ?? ""
-
-        var threshold = adaptivePauseSeconds
-        if connectorEndings.contains(trailingWord) || lower.hasSuffix("...") {
-            threshold += 0.22
-        }
-        if lower.count < 8 {
-            threshold += 0.10
-        }
-
-        return max(0.55, min(1.30, threshold))
     }
 
     private func greetingMessage() -> String {
         let rawName = appState.profile?.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let firstName = rawName.split(separator: " ").first.map(String.init) ?? ""
         if firstName.isEmpty {
-            return "Hi, I’m Nura. How are you feeling right now?"
+            return "Hi, I'm Nura. How are you feeling right now?"
         }
-        return "Hi \(firstName), I’m Nura. How are you feeling right now?"
-    }
-
-    private func idlePromptText(round: Int) -> String {
-        let rawName = appState.profile?.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let firstName = rawName.split(separator: " ").first.map(String.init) ?? ""
-
-        if round <= 1 {
-            if firstName.isEmpty {
-                return "Hey, still with me? I’m on standby — say anything and we’ll keep going."
-            }
-            return "Hey \(firstName), still with me? I’m on standby — say anything and we’ll keep going."
-        }
-
-        if firstName.isEmpty {
-            return "Last check — if you’d like to continue, just say a word now."
-        }
-        return "Last check, \(firstName) — if you’d like to continue, just say a word now."
-    }
-
-    private func configurePlaybackSession(preferLoudSpeaker: Bool = false) {
-        let session = AVAudioSession.sharedInstance()
-        do {
-            if preferLoudSpeaker {
-                try session.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowAirPlay])
-                try session.overrideOutputAudioPort(.speaker)
-            } else if isConversationActive {
-                // Keep duplex behavior in active conversation.
-                try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .allowAirPlay])
-                try session.overrideOutputAudioPort(.speaker)
-            } else {
-                try session.setCategory(.playback, mode: .spokenAudio, options: [.allowBluetooth, .allowAirPlay])
-                try session.overrideOutputAudioPort(.speaker)
-            }
-            try session.setActive(true)
-        } catch {
-            // keep silent; fallback still works
-        }
-    }
-
-    private func configureRecordSession() throws {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetooth, .duckOthers])
-        try session.setActive(true, options: .notifyOthersOnDeactivation)
-    }
-
-    @MainActor
-    private func speakNatural(_ text: String, emotion: String = "neutral", riskLevel: String = "low", gainDb: Double = 9.0, preferLoudSpeaker: Bool = false) async {
-        configurePlaybackSession(preferLoudSpeaker: preferLoudSpeaker)
-        setVoiceState(.speaking)
-        bargeInTriggered = false
-        let speed = speechSpeed(emotion: emotion, riskLevel: riskLevel)
-
-        func playCloudTTS() async throws {
-            let data = try await APIClient.shared.synthesizeSpeech(
-                baseURL: appState.apiBaseURL,
-                text: text,
-                style: "warm_female",
-                speed: speed,
-                gainDb: gainDb
-            )
-            audioPlayer = try AVAudioPlayer(data: data)
-            audioPlayer?.volume = 1.0
-            audioPlayer?.prepareToPlay()
-
-            let started = audioPlayer?.play() ?? false
-            guard started else {
-                throw NSError(domain: "NuraVoice", code: -1001, userInfo: [NSLocalizedDescriptionKey: "TTS audio could not start playback"])
-            }
-
-            while audioPlayer?.isPlaying == true {
-                if bargeInTriggered { break }
-                try? await Task.sleep(nanoseconds: 120_000_000)
-            }
-        }
-
-        do {
-            try await playCloudTTS()
-            if bargeInTriggered { return }
-            if !isRecording { setVoiceState(.idle) }
-            return
-        } catch is CancellationError {
-            return
-        } catch {
-            // Retry once before falling back to system speech (which sounds much quieter).
-            do {
-                try await playCloudTTS()
-                if bargeInTriggered { return }
-                if !isRecording { setVoiceState(.idle) }
-                return
-            } catch {
-                await speakFallback(text, speed: speed)
-            }
-        }
-    }
-
-    @MainActor
-    private func speakFallback(_ text: String, speed: Double = 0.9) async {
-        setVoiceState(.speaking)
-        bargeInTriggered = false
-
-        configurePlaybackSession(preferLoudSpeaker: true)
-        synth.stopSpeaking(at: .immediate)
-        let utterance = AVSpeechUtterance(string: text)
-        utterance.rate = Float(max(0.38, min(0.50, speed * 0.50)))
-        utterance.pitchMultiplier = 1.0
-        utterance.volume = 1.0
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
-        synth.speak(utterance)
-
-        let estimated = estimatedSpeechDuration(text: text, speed: speed)
-        try? await Task.sleep(nanoseconds: UInt64(max(0.9, estimated) * 1_000_000_000))
-        if bargeInTriggered { return }
-        if !isRecording { setVoiceState(.idle) }
-    }
-
-    private func speechSpeed(emotion: String, riskLevel: String) -> Double {
-        if riskLevel == "high" { return 0.80 }
-        if emotion == "anxious" || emotion == "high_distress" { return 0.84 }
-        if emotion == "calm" { return 0.92 }
-        return 0.90
-    }
-
-    private func estimatedSpeechDuration(text: String, speed: Double) -> Double {
-        let words = max(1, text.split(separator: " ").count)
-        let baseWps = 2.4 * max(0.7, speed)
-        return Double(words) / baseWps + 0.4
-    }
-
-    @MainActor
-    private func setVoiceState(_ state: VoiceState) {
-        voiceState = state
-        lastStateTransitionAt = Date()
-    }
-
-    @MainActor
-    private func startBargeInMonitor() {
-        guard isConversationActive else { return }
-
-        stopBargeInMonitor()
-        bargeInTriggered = false
-
-        do {
-            try configureRecordSession()
-        } catch {
-            return
-        }
-
-        let inputNode = audioEngine.inputNode
-        let fmt = inputNode.outputFormat(forBus: 0)
-        inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: fmt) { buffer, _ in
-            guard let channel = buffer.floatChannelData?[0] else { return }
-            let count = Int(buffer.frameLength)
-            if count <= 0 { return }
-            var sum: Float = 0
-            for i in 0..<count { sum += channel[i] * channel[i] }
-            let rms = sqrt(sum / Float(count))
-            if rms > 0.020 {
-                DispatchQueue.main.async {
-                    guard self.isConversationActive, self.voiceState == .speaking, !self.bargeInTriggered, !self.isIdlePromptSpeaking else { return }
-                    self.bargeInTriggered = true
-                    self.audioPlayer?.stop()
-                    self.audioPlayer = nil
-                    self.synth.stopSpeaking(at: .immediate)
-                    self.stopBargeInMonitor()
-                    self.setVoiceState(.listening)
-                    Task { await self.startRecording() }
-                }
-            }
-        }
-
-        audioEngine.prepare()
-        try? audioEngine.start()
-    }
-
-    @MainActor
-    private func stopBargeInMonitor() {
-        bargeInMonitorTask?.cancel()
-        bargeInMonitorTask = nil
-        if !isRecording {
-            audioEngine.stop()
-            audioEngine.inputNode.removeTap(onBus: 0)
-        }
-    }
-
-    @MainActor
-    private func startSessionWatchdog() {
-        sessionWatchdogTask?.cancel()
-        sessionWatchdogTask = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                if Task.isCancelled { return }
-                await MainActor.run {
-                    guard self.isConversationActive else { return }
-                    if self.idlePromptActive { return }
-
-                    let stalledFor = Date().timeIntervalSince(self.lastStateTransitionAt)
-                    if self.voiceState == .listening && !self.isRecording {
-                        Task { await self.startRecording() }
-                        return
-                    }
-
-                    if self.voiceState == .listening && self.isRecording {
-                        let quietFor = Date().timeIntervalSince(self.lastVoiceActivityAt)
-                        if quietFor > 10 {
-                            self.pendingTranscript = ""
-                            self.heardSpeechInTurn = false
-                        }
-                        let recordingAge = Date().timeIntervalSince(self.recordingStartedAt)
-                        if recordingAge > 9 {
-                            self.isRecording = false
-                            self.audioEngine.stop()
-                            self.audioEngine.inputNode.removeTap(onBus: 0)
-                            self.recognitionRequest?.endAudio()
-                            self.recognitionTask?.cancel()
-                            self.recognitionTask = nil
-                            Task { await self.startRecording() }
-                        }
-                    }
-
-                    if self.voiceState == .thinking && self.sending && stalledFor > 15 {
-                        self.sending = false
-                        self.setVoiceState(.listening)
-                        Task { await self.startRecording() }
-                    }
-                }
-            }
-        }
+        return "Hi \(firstName), I'm Nura. How are you feeling right now?"
     }
 
     private func hideKeyboard() {
@@ -862,39 +184,40 @@ struct TherapistView: View {
     }
 }
 
+// MARK: - VoiceState
+
 private enum VoiceState {
-    case idle
-    case listening
-    case thinking
-    case speaking
+    case idle, listening, thinking, speaking
 
     var title: String {
         switch self {
-        case .idle: return "Ready"
+        case .idle:      return "Ready"
         case .listening: return "Listening"
-        case .thinking: return "Thinking"
-        case .speaking: return "Speaking"
+        case .thinking:  return "Thinking"
+        case .speaking:  return "Speaking"
         }
     }
 
     var color: Color {
         switch self {
-        case .idle: return .white
+        case .idle:      return .white
         case .listening: return .cyan
-        case .thinking: return .purple
-        case .speaking: return .mint
+        case .thinking:  return .purple
+        case .speaking:  return .mint
         }
     }
 
     var scaleRange: ClosedRange<CGFloat> {
         switch self {
-        case .idle: return 1.0...1.03
+        case .idle:      return 1.0...1.03
         case .listening: return 1.0...1.12
-        case .thinking: return 0.96...1.02
-        case .speaking: return 1.0...1.18
+        case .thinking:  return 0.96...1.02
+        case .speaking:  return 1.0...1.18
         }
     }
 }
+
+// MARK: - VoiceOrbView
 
 private struct VoiceOrbView: View {
     let state: VoiceState
@@ -908,7 +231,6 @@ private struct VoiceOrbView: View {
             let palette = colors(for: state)
 
             ZStack {
-                // Outer bloom halo
                 Circle()
                     .fill(
                         RadialGradient(
@@ -922,7 +244,6 @@ private struct VoiceOrbView: View {
                     .blur(radius: 20)
                     .scaleEffect(1.0 + 0.08 * CGFloat(pulse))
 
-                // Fluid core (shader-like metaball feel using Canvas + additive blend)
                 Canvas { context, size in
                     let center = CGPoint(x: size.width / 2, y: size.height / 2)
                     context.addFilter(.blur(radius: 10))
@@ -934,18 +255,15 @@ private struct VoiceOrbView: View {
                         let radius = 26.0 + 18.0 * sin(t * 0.8 + fi)
                         let x = center.x + CGFloat(cos(angle) * radius)
                         let y = center.y + CGFloat(sin(angle * 1.2) * radius)
-
                         let wobble = sin(t * 1.7 + fi * 1.3)
                         let blobSizeDouble = 34.0 + 18.0 * (0.5 + 0.5 * wobble)
                         let blobSize = CGFloat(blobSizeDouble)
-
                         let rect = CGRect(x: x - blobSize / 2, y: y - blobSize / 2, width: blobSize, height: blobSize)
                         let usePrimary = fi.truncatingRemainder(dividingBy: 2) < 1
                         let c: Color = usePrimary ? palette.primary.opacity(0.45) : palette.secondary.opacity(0.40)
                         context.fill(Path(ellipseIn: rect), with: .color(c))
                     }
 
-                    // central body
                     context.fill(
                         Path(ellipseIn: CGRect(x: center.x - 56, y: center.y - 56, width: 112, height: 112)),
                         with: .radialGradient(
@@ -959,7 +277,6 @@ private struct VoiceOrbView: View {
                 .frame(width: 180, height: 180)
                 .scaleEffect(scale)
 
-                // Glass ring + moving specular highlight
                 Circle()
                     .stroke(
                         AngularGradient(
