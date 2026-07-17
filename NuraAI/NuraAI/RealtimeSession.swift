@@ -14,19 +14,20 @@ final class RealtimeSession: ObservableObject {
     var onUserTranscript: ((String) -> Void)?
     var onAssistantMessage: ((String) -> Void)?
 
-    // nonisolated(unsafe): accessed from the real-time audio tap thread without
-    // actor hops that would introduce latency. Set/cleared only on main actor.
+    // nonisolated(unsafe): read from the real-time audio tap thread.
+    // Written only on MainActor before the tap starts.
     nonisolated(unsafe) private var wsTask: URLSessionWebSocketTask?
-    nonisolated(unsafe) private var inputConverter: AVAudioConverter?
-    nonisolated(unsafe) private let f32_24k: AVAudioFormat = AVAudioFormat(
+
+    private let engine = AVAudioEngine()
+    private let player = AVAudioPlayerNode()
+
+    // 24 kHz Float32 mono — output format for both resampled mic and playback
+    private let playFmt = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
         sampleRate: 24_000,
         channels: 1,
         interleaved: false
     )!
-
-    private let engine = AVAudioEngine()
-    private let player = AVAudioPlayerNode()
 
     private var pendingReplyText = ""
     private var pendingBufferCount = 0
@@ -38,8 +39,8 @@ final class RealtimeSession: ObservableObject {
         guard rtState == .disconnected else { return }
         rtState = .connecting
 
-        // Request mic permission first; audio hardware format is invalid (0 Hz)
-        // until the session is active and permission is granted.
+        // Request mic permission before touching audio hardware —
+        // input format is 0 Hz until permission is granted.
         AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -53,7 +54,8 @@ final class RealtimeSession: ObservableObject {
         let wsBase = apiBaseURL
             .replacingOccurrences(of: "https://", with: "wss://")
             .replacingOccurrences(of: "http://",  with: "ws://")
-        let nameParam = firstName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let nameParam = firstName.addingPercentEncoding(
+            withAllowedCharacters: .urlQueryAllowed) ?? ""
         let urlString = "\(wsBase)/realtime/ws?first_name=\(nameParam)"
 
         guard let url = URL(string: urlString) else {
@@ -80,28 +82,30 @@ final class RealtimeSession: ObservableObject {
     // MARK: - Audio Engine
 
     private func setupAudio() {
-        let s = AVAudioSession.sharedInstance()
-        try? s.setCategory(.playAndRecord, mode: .voiceChat,
-                           options: [.allowBluetooth, .allowAirPlay])
-        try? s.overrideOutputAudioPort(.speaker)
-        try? s.setActive(true)
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playAndRecord, mode: .voiceChat,
+                                 options: [.allowBluetooth, .allowAirPlay])
+        try? session.setPreferredSampleRate(24_000)   // ask hardware for 24 kHz
+        try? session.overrideOutputAudioPort(.speaker)
+        try? session.setActive(true)
 
         let inputNode = engine.inputNode
+        // Query format AFTER session is active — sampleRate is valid now
         let hwFmt = inputNode.outputFormat(forBus: 0)
-        inputConverter = AVAudioConverter(from: hwFmt, to: f32_24k)
 
         engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: f32_24k)
+        engine.connect(player, to: engine.mainMixerNode, format: playFmt)
 
+        // Install tap in the hardware format; we resample manually in the callback
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFmt) { [weak self] buf, _ in
-            self?.sendMicChunk(buf)
+            self?.handleMicBuffer(buf)
         }
 
         do {
             try engine.start()
             player.play()
         } catch {
-            print("[RealtimeSession] engine start error: \(error)")
+            print("[RT] engine start error: \(error)")
         }
     }
 
@@ -109,39 +113,37 @@ final class RealtimeSession: ObservableObject {
         engine.inputNode.removeTap(onBus: 0)
         player.stop()
         engine.stop()
-        if engine.attachedNodes.contains(player) {
-            engine.detach(player)
-        }
+        if engine.attachedNodes.contains(player) { engine.detach(player) }
     }
 
     // MARK: - Mic → WebSocket
-    // Runs on the audio tap thread. Accesses nonisolated(unsafe) properties.
-    private nonisolated func sendMicChunk(_ buffer: AVAudioPCMBuffer) {
+    // Called on the real-time audio thread. No MainActor hops allowed.
+
+    private nonisolated func handleMicBuffer(_ buffer: AVAudioPCMBuffer) {
         guard let ws = wsTask else { return }
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0,
+              let src = buffer.floatChannelData?[0] else { return }
 
-        let ratio = 24_000.0 / buffer.format.sampleRate
-        let outFrames = AVAudioFrameCount(ceil(Double(buffer.frameLength) * ratio))
-        guard outFrames > 0,
-              let outBuf = AVAudioPCMBuffer(pcmFormat: f32_24k, frameCapacity: outFrames) else { return }
+        let srcRate = buffer.format.sampleRate
+        guard srcRate > 0 else { return }
 
-        var consumed = false
-        var convErr: NSError?
-        inputConverter?.convert(to: outBuf, error: &convErr) { _, status in
-            if consumed { status.pointee = .noDataNow; return nil }
-            consumed = true
-            status.pointee = .haveData
-            return buffer
+        // Resample to 24 kHz via linear interpolation, then convert Float32 → Int16
+        let step    = srcRate / 24_000.0
+        let outLen  = max(1, Int(Double(frameCount) / step))
+        var pcm16   = [Int16](repeating: 0, count: outLen)
+
+        for i in 0..<outLen {
+            let pos  = Double(i) * step
+            let lo   = Int(pos)
+            let hi   = min(lo + 1, frameCount - 1)
+            let frac = Float(pos - Double(lo))
+            let s    = src[lo] + frac * (src[hi] - src[lo])
+            let clamped = max(-32_767, min(32_767, Int32(s * 32_767)))
+            pcm16[i] = Int16(clamped)
         }
-        guard convErr == nil, outBuf.frameLength > 0,
-              let fp = outBuf.floatChannelData?[0] else { return }
 
-        let count = Int(outBuf.frameLength)
-        var pcm = [Int16](repeating: 0, count: count)
-        for i in 0..<count {
-            pcm[i] = Int16(max(-1.0, min(1.0, fp[i])) * 32_767)
-        }
-
-        let raw = Data(bytes: pcm, count: count * 2)
+        let raw   = Data(bytes: pcm16, count: pcm16.count * 2)
         let event = "{\"type\":\"input_audio_buffer.append\",\"audio\":\"\(raw.base64EncodedString())\"}"
         ws.send(.string(event)) { _ in }
     }
@@ -150,7 +152,6 @@ final class RealtimeSession: ObservableObject {
 
     private func startReceiving() {
         wsTask?.receive { [weak self] result in
-            // Always hop to MainActor so all self access is actor-isolated
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 switch result {
@@ -163,7 +164,8 @@ final class RealtimeSession: ObservableObject {
                     }
                     if !text.isEmpty { self.handleEvent(text) }
                     self.startReceiving()
-                case .failure:
+                case .failure(let err):
+                    print("[RT] WebSocket error: \(err)")
                     if self.rtState != .disconnected { self.rtState = .disconnected }
                 }
             }
@@ -214,16 +216,22 @@ final class RealtimeSession: ObservableObject {
                 onUserTranscript?(t)
             }
 
+        case "error":
+            print("[RT] OpenAI error event: \(text)")
+
         default:
             break
         }
     }
 
+    // MARK: - Playback
+
     private func scheduleAudioChunk(_ raw: Data) {
         let frameCount = raw.count / 2
         guard frameCount > 0,
-              let buf = AVAudioPCMBuffer(pcmFormat: f32_24k,
-                                         frameCapacity: AVAudioFrameCount(frameCount)) else { return }
+              let buf = AVAudioPCMBuffer(pcmFormat: playFmt,
+                                         frameCapacity: AVAudioFrameCount(frameCount))
+        else { return }
         buf.frameLength = AVAudioFrameCount(frameCount)
 
         raw.withUnsafeBytes { ptr in
