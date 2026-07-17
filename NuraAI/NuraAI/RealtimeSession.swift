@@ -14,14 +14,14 @@ final class RealtimeSession: ObservableObject {
     var onUserTranscript: ((String) -> Void)?
     var onAssistantMessage: ((String) -> Void)?
 
-    // nonisolated(unsafe): read from the real-time audio tap thread.
-    // Written only on MainActor before the tap starts.
+    // Written on MainActor, read on audio tap thread — nonisolated(unsafe) is safe
+    // because the tap is always removed before wsTask is set to nil.
     nonisolated(unsafe) private var wsTask: URLSessionWebSocketTask?
 
-    private let engine = AVAudioEngine()
-    private let player = AVAudioPlayerNode()
+    // Recreated each session to guarantee a clean engine graph
+    private var engine = AVAudioEngine()
+    private var player = AVAudioPlayerNode()
 
-    // 24 kHz Float32 mono — output format for both resampled mic and playback
     private let playFmt = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
         sampleRate: 24_000,
@@ -39,8 +39,6 @@ final class RealtimeSession: ObservableObject {
         guard rtState == .disconnected else { return }
         rtState = .connecting
 
-        // Request mic permission before touching audio hardware —
-        // input format is 0 Hz until permission is granted.
         AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -65,7 +63,13 @@ final class RealtimeSession: ObservableObject {
         wsTask = URLSession.shared.webSocketTask(with: url)
         wsTask?.resume()
         startReceiving()
-        setupAudio()
+
+        guard setupAudio() else {
+            wsTask?.cancel(with: .goingAway, reason: nil)
+            wsTask = nil
+            rtState = .disconnected
+            return
+        }
         rtState = .listening
     }
 
@@ -80,44 +84,63 @@ final class RealtimeSession: ObservableObject {
     }
 
     // MARK: - Audio Engine
+    // Returns false if setup fails (engine can't start).
 
-    private func setupAudio() {
+    @discardableResult
+    private func setupAudio() -> Bool {
+        // Always start from a fresh engine to avoid "already attached" crashes
+        engine = AVAudioEngine()
+        player = AVAudioPlayerNode()
+
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playAndRecord, mode: .voiceChat,
-                                 options: [.allowBluetooth, .allowAirPlay])
-        try? session.setPreferredSampleRate(24_000)   // ask hardware for 24 kHz
-        try? session.overrideOutputAudioPort(.speaker)
-        try? session.setActive(true)
-
-        let inputNode = engine.inputNode
-        // Query format AFTER session is active — sampleRate is valid now
-        let hwFmt = inputNode.outputFormat(forBus: 0)
+        do {
+            try session.setCategory(.playAndRecord, mode: .voiceChat,
+                                    options: [.allowBluetoothA2DP, .allowAirPlay])
+            try session.setPreferredSampleRate(24_000)
+            try session.overrideOutputAudioPort(.speaker)
+            try session.setActive(true)
+        } catch {
+            print("[RT] AVAudioSession setup error: \(error)")
+        }
 
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: playFmt)
 
-        // Install tap in the hardware format; we resample manually in the callback
+        // Start engine FIRST — only then is inputNode's format reliable
+        do {
+            try engine.start()
+        } catch {
+            print("[RT] engine.start() failed: \(error)")
+            return false
+        }
+
+        player.play()
+
+        // Query format after engine is running
+        let inputNode = engine.inputNode
+        let hwFmt = inputNode.outputFormat(forBus: 0)
+        guard hwFmt.sampleRate > 0 else {
+            print("[RT] invalid input format: \(hwFmt)")
+            engine.stop()
+            return false
+        }
+
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFmt) { [weak self] buf, _ in
             self?.handleMicBuffer(buf)
         }
 
-        do {
-            try engine.start()
-            player.play()
-        } catch {
-            print("[RT] engine start error: \(error)")
-        }
+        return true
     }
 
     private func teardownAudio() {
-        engine.inputNode.removeTap(onBus: 0)
-        player.stop()
-        engine.stop()
-        if engine.attachedNodes.contains(player) { engine.detach(player) }
+        if engine.isRunning {
+            engine.inputNode.removeTap(onBus: 0)
+            player.stop()
+            engine.stop()
+        }
     }
 
-    // MARK: - Mic → WebSocket
-    // Called on the real-time audio thread. No MainActor hops allowed.
+    // MARK: - Mic → WebSocket (audio tap thread)
 
     private nonisolated func handleMicBuffer(_ buffer: AVAudioPCMBuffer) {
         guard let ws = wsTask else { return }
@@ -128,10 +151,10 @@ final class RealtimeSession: ObservableObject {
         let srcRate = buffer.format.sampleRate
         guard srcRate > 0 else { return }
 
-        // Resample to 24 kHz via linear interpolation, then convert Float32 → Int16
-        let step    = srcRate / 24_000.0
-        let outLen  = max(1, Int(Double(frameCount) / step))
-        var pcm16   = [Int16](repeating: 0, count: outLen)
+        // Linear-interpolation resample to 24 kHz, then Float32 → Int16
+        let step   = srcRate / 24_000.0
+        let outLen = max(1, Int(Double(frameCount) / step))
+        var pcm16  = [Int16](repeating: 0, count: outLen)
 
         for i in 0..<outLen {
             let pos  = Double(i) * step
@@ -139,8 +162,7 @@ final class RealtimeSession: ObservableObject {
             let hi   = min(lo + 1, frameCount - 1)
             let frac = Float(pos - Double(lo))
             let s    = src[lo] + frac * (src[hi] - src[lo])
-            let clamped = max(-32_767, min(32_767, Int32(s * 32_767)))
-            pcm16[i] = Int16(clamped)
+            pcm16[i] = Int16(max(-32_767, min(32_767, Int32(s * 32_767))))
         }
 
         let raw   = Data(bytes: pcm16, count: pcm16.count * 2)
@@ -148,7 +170,7 @@ final class RealtimeSession: ObservableObject {
         ws.send(.string(event)) { _ in }
     }
 
-    // MARK: - WebSocket → Main Actor
+    // MARK: - WebSocket receive loop
 
     private func startReceiving() {
         wsTask?.receive { [weak self] result in
@@ -165,12 +187,14 @@ final class RealtimeSession: ObservableObject {
                     if !text.isEmpty { self.handleEvent(text) }
                     self.startReceiving()
                 case .failure(let err):
-                    print("[RT] WebSocket error: \(err)")
+                    print("[RT] ws receive error: \(err)")
                     if self.rtState != .disconnected { self.rtState = .disconnected }
                 }
             }
         }
     }
+
+    // MARK: - Event handler
 
     private func handleEvent(_ text: String) {
         guard let data = text.data(using: .utf8),
@@ -181,10 +205,10 @@ final class RealtimeSession: ObservableObject {
 
         case "input_audio_buffer.speech_started":
             player.stop()
+            player.play()
             pendingReplyText = ""
             pendingBufferCount = 0
             responseDone = false
-            player.play()
             rtState = .listening
 
         case "input_audio_buffer.speech_stopped":
@@ -217,7 +241,7 @@ final class RealtimeSession: ObservableObject {
             }
 
         case "error":
-            print("[RT] OpenAI error event: \(text)")
+            print("[RT] OpenAI error: \(text)")
 
         default:
             break
