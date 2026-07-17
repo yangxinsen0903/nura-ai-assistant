@@ -208,24 +208,26 @@ final class RealtimeSession: ObservableObject {
         case "response.created", "response.output_item.added":
             rtState = .thinking
 
-        case "response.audio.delta":
+        // GA API (June 2026): event names changed from beta
+        case "response.output_audio.delta":
             guard let delta = json["delta"] as? String,
                   let raw = Data(base64Encoded: delta),
                   raw.count >= 2 else { return }
             rtState = .speaking
             scheduleAudioChunk(raw)
 
-        case "response.audio.done":
+        case "response.output_audio.done":
             responseDone = true
             checkTransitionToListening()
             let msg = pendingReplyText.trimmingCharacters(in: .whitespacesAndNewlines)
             if !msg.isEmpty { onAssistantMessage?(msg) }
             pendingReplyText = ""
 
-        case "response.audio_transcript.delta":
+        case "response.output_audio_transcript.delta":
             if let d = json["delta"] as? String { pendingReplyText += d }
 
-        case "conversation.item.input_audio_transcription.completed":
+        case "conversation.item.input_audio_transcription.completed",
+             "conversation.item.input_audio_transcription.delta":
             if let t = (json["transcript"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
                 onUserTranscript?(t)

@@ -30,10 +30,7 @@ async def realtime_ws(
         first_name=first_name or None,
     )
 
-    # OpenAI Realtime API is now GA — no OpenAI-Beta header needed
-    oai_headers = {
-        "Authorization": f"Bearer {settings.openai_api_key}",
-    }
+    oai_headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
 
     try:
         async with websockets.connect(
@@ -41,24 +38,36 @@ async def realtime_ws(
             additional_headers=oai_headers,
             ping_interval=20,
         ) as oai_ws:
-            # Configure session immediately after connecting
+            # Wait for session.created before sending session.update
+            await oai_ws.recv()
+
+            # GA API (June 2026) session.update — structure changed from beta
             session_update = {
                 "type": "session.update",
                 "session": {
-                    "modalities": ["audio", "text"],
+                    "type": "realtime",
+                    "output_modalities": ["audio"],
                     "instructions": system_prompt,
-                    "voice": "nova",
-                    "input_audio_format": "pcm16",
-                    "output_audio_format": "pcm16",
-                    "input_audio_transcription": {"model": "whisper-1"},
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.5,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 700,
-                    },
+                    "max_output_tokens": 150,
                     "temperature": 0.7,
-                    "max_response_output_tokens": 150,
+                    "audio": {
+                        "input": {
+                            "format": {"type": "audio/pcm", "rate": 24000},
+                            "turn_detection": {
+                                "type": "server_vad",
+                                "threshold": 0.5,
+                                "prefix_padding_ms": 300,
+                                "silence_duration_ms": 700,
+                                "create_response": True,
+                                "interrupt_response": True,
+                            },
+                        },
+                        "output": {
+                            "format": {"type": "audio/pcm", "rate": 24000},
+                            "voice": "coral",
+                            "speed": 1.0,
+                        },
+                    },
                 },
             }
             await oai_ws.send(json.dumps(session_update))
