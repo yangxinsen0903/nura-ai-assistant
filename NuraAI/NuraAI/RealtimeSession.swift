@@ -38,6 +38,18 @@ final class RealtimeSession: ObservableObject {
         guard rtState == .disconnected else { return }
         rtState = .connecting
 
+        // Request mic permission first; audio hardware format is invalid (0 Hz)
+        // until the session is active and permission is granted.
+        AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard granted else { self.rtState = .disconnected; return }
+                self.finishConnect(apiBaseURL: apiBaseURL, firstName: firstName)
+            }
+        }
+    }
+
+    private func finishConnect(apiBaseURL: String, firstName: String) {
         let wsBase = apiBaseURL
             .replacingOccurrences(of: "https://", with: "wss://")
             .replacingOccurrences(of: "http://",  with: "ws://")
