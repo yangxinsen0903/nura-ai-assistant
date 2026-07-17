@@ -1,13 +1,8 @@
 import AVFoundation
 import Foundation
 
-// MARK: - RealtimeSession
-// Manages a WebSocket connection to the backend /api/v1/realtime/ws endpoint,
-// which proxies to the OpenAI Realtime API. Handles bidirectional PCM16 audio
-// streaming for sub-second latency voice conversation.
-
 @MainActor
-final class RealtimeSession: NSObject, ObservableObject {
+final class RealtimeSession: ObservableObject {
 
     enum RTState {
         case disconnected, connecting, listening, thinking, speaking
@@ -15,29 +10,26 @@ final class RealtimeSession: NSObject, ObservableObject {
 
     @Published var rtState: RTState = .disconnected
 
-    // Fired on main thread when the user's speech is transcribed
     var onUserTranscript: ((String) -> Void)?
-    // Fired on main thread when a complete assistant reply text is available
     var onAssistantMessage: ((String) -> Void)?
 
-    private var wsTask: URLSessionWebSocketTask?
-    private let engine = AVAudioEngine()
-    private let player = AVAudioPlayerNode()
-    private var inputConverter: AVAudioConverter?
-
-    // Accumulate assistant transcript deltas until response.audio.done
-    private var pendingReplyText = ""
-    // Track scheduled-but-not-yet-played buffers for accurate speaking→listening transition
-    private var pendingBufferCount = 0
-    private var responseDone = false
-
-    // 24 kHz mono Float32 — used both as converter target and player schedule format
-    private let f32_24k = AVAudioFormat(
+    // nonisolated(unsafe): accessed from the real-time audio tap thread without
+    // actor hops that would introduce latency. Set/cleared only on main actor.
+    nonisolated(unsafe) private var wsTask: URLSessionWebSocketTask?
+    nonisolated(unsafe) private var inputConverter: AVAudioConverter?
+    nonisolated(unsafe) private let f32_24k: AVAudioFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
         sampleRate: 24_000,
         channels: 1,
         interleaved: false
     )!
+
+    private let engine = AVAudioEngine()
+    private let player = AVAudioPlayerNode()
+
+    private var pendingReplyText = ""
+    private var pendingBufferCount = 0
+    private var responseDone = false
 
     // MARK: - Connect / Disconnect
 
@@ -45,7 +37,6 @@ final class RealtimeSession: NSObject, ObservableObject {
         guard rtState == .disconnected else { return }
         rtState = .connecting
 
-        // Convert https:// → wss://, then append /realtime/ws
         let wsBase = apiBaseURL
             .replacingOccurrences(of: "https://", with: "wss://")
             .replacingOccurrences(of: "http://",  with: "ws://")
@@ -76,7 +67,11 @@ final class RealtimeSession: NSObject, ObservableObject {
     // MARK: - Audio Engine
 
     private func setupAudio() {
-        configureAudioSession()
+        let s = AVAudioSession.sharedInstance()
+        try? s.setCategory(.playAndRecord, mode: .voiceChat,
+                           options: [.allowBluetooth, .allowAirPlay])
+        try? s.overrideOutputAudioPort(.speaker)
+        try? s.setActive(true)
 
         let inputNode = engine.inputNode
         let hwFmt = inputNode.outputFormat(forBus: 0)
@@ -106,22 +101,11 @@ final class RealtimeSession: NSObject, ObservableObject {
         }
     }
 
-    private func configureAudioSession() {
-        let s = AVAudioSession.sharedInstance()
-        // voiceChat mode enables built-in acoustic echo cancellation
-        try? s.setCategory(.playAndRecord, mode: .voiceChat,
-                           options: [.allowBluetooth, .allowAirPlay])
-        try? s.overrideOutputAudioPort(.speaker)
-        try? s.setActive(true)
-    }
-
     // MARK: - Mic → WebSocket
-
-    // Runs on the audio tap's background thread — keep non-@MainActor work here.
+    // Runs on the audio tap thread. Accesses nonisolated(unsafe) properties.
     private nonisolated func sendMicChunk(_ buffer: AVAudioPCMBuffer) {
         guard let ws = wsTask else { return }
 
-        // Resample to 24 kHz Float32
         let ratio = 24_000.0 / buffer.format.sampleRate
         let outFrames = AVAudioFrameCount(ceil(Double(buffer.frameLength) * ratio))
         guard outFrames > 0,
@@ -138,11 +122,10 @@ final class RealtimeSession: NSObject, ObservableObject {
         guard convErr == nil, outBuf.frameLength > 0,
               let fp = outBuf.floatChannelData?[0] else { return }
 
-        // Float32 → Int16 PCM16
         let count = Int(outBuf.frameLength)
         var pcm = [Int16](repeating: 0, count: count)
         for i in 0..<count {
-            pcm[i] = Int16(max(-1, min(1, fp[i])) * 32_767)
+            pcm[i] = Int16(max(-1.0, min(1.0, fp[i])) * 32_767)
         }
 
         let raw = Data(bytes: pcm, count: count * 2)
@@ -150,25 +133,24 @@ final class RealtimeSession: NSObject, ObservableObject {
         ws.send(.string(event)) { _ in }
     }
 
-    // MARK: - WebSocket → Speaker
+    // MARK: - WebSocket → Main Actor
 
     private func startReceiving() {
         wsTask?.receive { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .success(let msg):
-                let text: String
-                switch msg {
-                case .string(let s): text = s
-                case .data(let d):   text = String(data: d, encoding: .utf8) ?? ""
-                @unknown default:    text = ""
-                }
-                if !text.isEmpty {
-                    Task { @MainActor in self.handleEvent(text) }
-                }
-                self.startReceiving()
-            case .failure:
-                Task { @MainActor in
+            // Always hop to MainActor so all self access is actor-isolated
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                switch result {
+                case .success(let msg):
+                    let text: String
+                    switch msg {
+                    case .string(let s): text = s
+                    case .data(let d):   text = String(data: d, encoding: .utf8) ?? ""
+                    @unknown default:    text = ""
+                    }
+                    if !text.isEmpty { self.handleEvent(text) }
+                    self.startReceiving()
+                case .failure:
                     if self.rtState != .disconnected { self.rtState = .disconnected }
                 }
             }
@@ -183,7 +165,6 @@ final class RealtimeSession: NSObject, ObservableObject {
         switch type {
 
         case "input_audio_buffer.speech_started":
-            // Barge-in: stop playback, reset pending state
             player.stop()
             pendingReplyText = ""
             pendingBufferCount = 0
