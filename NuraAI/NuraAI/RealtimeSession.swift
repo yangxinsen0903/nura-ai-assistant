@@ -17,12 +17,11 @@ final class RealtimeSession: ObservableObject {
     // Written on MainActor, read on audio tap thread — nonisolated(unsafe) is safe
     // because the tap is always removed before wsTask is set to nil.
     nonisolated(unsafe) private var wsTask: URLSessionWebSocketTask?
-    // Gates mic during AI playback to prevent speaker echo re-entering the model
     nonisolated(unsafe) private var micMuted: Bool = false
 
-    // Recreated each session to guarantee a clean engine graph
     private var engine = AVAudioEngine()
     private var player = AVAudioPlayerNode()
+    private var gainEQ = AVAudioUnitEQ(numberOfBands: 0)
 
     private let playFmt = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
@@ -92,10 +91,11 @@ final class RealtimeSession: ObservableObject {
     private func setupAudio() -> Bool {
         engine = AVAudioEngine()
         player = AVAudioPlayerNode()
+        gainEQ = AVAudioUnitEQ(numberOfBands: 0)
+        gainEQ.globalGain = 24.0   // +24 dB ≈ 16× amplitude; compensates for Realtime API low output level
 
         let session = AVAudioSession.sharedInstance()
         do {
-            // No setPreferredSampleRate — let hardware choose; we resample in callback
             try session.setCategory(.playAndRecord, mode: .voiceChat,
                                     options: [.allowBluetoothA2DP, .allowAirPlay])
             try session.overrideOutputAudioPort(.speaker)
@@ -105,7 +105,9 @@ final class RealtimeSession: ObservableObject {
         }
 
         engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: playFmt)
+        engine.attach(gainEQ)
+        engine.connect(player, to: gainEQ, format: playFmt)
+        engine.connect(gainEQ, to: engine.mainMixerNode, format: playFmt)
 
         // nil format: engine uses native hardware format for the tap.
         // buffer.format in the callback has the real sample rate — no upfront query needed.
@@ -148,8 +150,8 @@ final class RealtimeSession: ObservableObject {
         guard let ws = wsTask else { return }
 
         if micMuted {
-            // AEC (voiceChat mode) suppresses speaker echo; energy > 0.06 = real user speech → barge-in
-            if rms(buffer) > 0.06 {
+            // AEC (voiceChat mode) suppresses speaker echo; energy > 0.05 = real user speech → barge-in
+            if rms(buffer) > 0.05 {
                 Task { @MainActor [weak self] in self?.triggerBargeIn() }
             }
             return
@@ -274,6 +276,9 @@ final class RealtimeSession: ObservableObject {
         pendingReplyText = ""
         pendingBufferCount = 0
         responseDone = false
+        // Cancel server-side response FIRST so OpenAI stops sending audio deltas;
+        // without this the next delta event re-sets micMuted=true and undoes the barge-in
+        wsTask?.send(.string("{\"type\":\"response.cancel\"}")) { _ in }
         wsTask?.send(.string("{\"type\":\"input_audio_buffer.clear\"}")) { _ in }
         rtState = .listening
     }
@@ -289,9 +294,9 @@ final class RealtimeSession: ObservableObject {
         raw.withUnsafeBytes { ptr in
             guard let src = ptr.bindMemory(to: Int16.self).baseAddress,
                   let dst = buf.floatChannelData?[0] else { return }
-            // 3.5× gain to match previous TTS volume; clamp to avoid clipping
+            // Gain is handled by gainEQ node (+24 dB); convert cleanly here
             for i in 0..<frameCount {
-                dst[i] = max(-1.0, min(1.0, Float(src[i]) / 32_767.0 * 3.5))
+                dst[i] = Float(src[i]) / 32_767.0
             }
         }
 
