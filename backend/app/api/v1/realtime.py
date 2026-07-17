@@ -9,7 +9,7 @@ from app.services.assistant_service import _build_system_prompt
 
 router = APIRouter(prefix="/realtime", tags=["realtime"])
 
-_OPENAI_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
+_OPENAI_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime-2"
 
 
 @router.websocket("/ws")
@@ -30,9 +30,9 @@ async def realtime_ws(
         first_name=first_name or None,
     )
 
+    # OpenAI Realtime API is now GA — no OpenAI-Beta header needed
     oai_headers = {
         "Authorization": f"Bearer {settings.openai_api_key}",
-        "OpenAI-Beta": "realtime=v1",
     }
 
     try:
