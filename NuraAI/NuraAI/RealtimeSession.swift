@@ -17,6 +17,8 @@ final class RealtimeSession: ObservableObject {
     // Written on MainActor, read on audio tap thread — nonisolated(unsafe) is safe
     // because the tap is always removed before wsTask is set to nil.
     nonisolated(unsafe) private var wsTask: URLSessionWebSocketTask?
+    // Gates mic during AI playback to prevent speaker echo re-entering the model
+    nonisolated(unsafe) private var micMuted: Bool = false
 
     // Recreated each session to guarantee a clean engine graph
     private var engine = AVAudioEngine()
@@ -134,7 +136,7 @@ final class RealtimeSession: ObservableObject {
     // MARK: - Mic → WebSocket (audio tap thread)
 
     private nonisolated func handleMicBuffer(_ buffer: AVAudioPCMBuffer) {
-        guard let ws = wsTask else { return }
+        guard let ws = wsTask, !micMuted else { return }
         let frameCount = Int(buffer.frameLength)
         guard frameCount > 0,
               let src = buffer.floatChannelData?[0] else { return }
@@ -195,8 +197,10 @@ final class RealtimeSession: ObservableObject {
         switch type {
 
         case "input_audio_buffer.speech_started":
+            // This fires if barge-in happens before mic was muted — just reset state
             player.stop()
             player.play()
+            micMuted = false
             pendingReplyText = ""
             pendingBufferCount = 0
             responseDone = false
@@ -213,6 +217,7 @@ final class RealtimeSession: ObservableObject {
             guard let delta = json["delta"] as? String,
                   let raw = Data(base64Encoded: delta),
                   raw.count >= 2 else { return }
+            micMuted = true   // mute mic while AI is speaking to prevent echo loop
             rtState = .speaking
             scheduleAudioChunk(raw)
 
@@ -269,6 +274,9 @@ final class RealtimeSession: ObservableObject {
 
     private func checkTransitionToListening() {
         if responseDone && pendingBufferCount == 0 && rtState == .speaking {
+            // Clear any echo audio OpenAI may have buffered while AI was speaking
+            wsTask?.send(.string("{\"type\":\"input_audio_buffer.clear\"}")) { _ in }
+            micMuted = false   // unmute mic so user can speak again
             rtState = .listening
             responseDone = false
         }
