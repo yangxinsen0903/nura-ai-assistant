@@ -135,8 +135,26 @@ final class RealtimeSession: ObservableObject {
 
     // MARK: - Mic → WebSocket (audio tap thread)
 
+    private nonisolated func rms(_ buffer: AVAudioPCMBuffer) -> Float {
+        guard let src = buffer.floatChannelData?[0] else { return 0 }
+        let n = Int(buffer.frameLength)
+        guard n > 0 else { return 0 }
+        var sum: Float = 0
+        for i in 0..<n { sum += src[i] * src[i] }
+        return (sum / Float(n)).squareRoot()
+    }
+
     private nonisolated func handleMicBuffer(_ buffer: AVAudioPCMBuffer) {
-        guard let ws = wsTask, !micMuted else { return }
+        guard let ws = wsTask else { return }
+
+        if micMuted {
+            // AEC (voiceChat mode) suppresses speaker echo; energy > 0.06 = real user speech → barge-in
+            if rms(buffer) > 0.06 {
+                Task { @MainActor [weak self] in self?.triggerBargeIn() }
+            }
+            return
+        }
+
         let frameCount = Int(buffer.frameLength)
         guard frameCount > 0,
               let src = buffer.floatChannelData?[0] else { return }
@@ -248,6 +266,18 @@ final class RealtimeSession: ObservableObject {
 
     // MARK: - Playback
 
+    private func triggerBargeIn() {
+        guard rtState == .speaking || rtState == .thinking else { return }
+        player.stop()
+        player.play()
+        micMuted = false
+        pendingReplyText = ""
+        pendingBufferCount = 0
+        responseDone = false
+        wsTask?.send(.string("{\"type\":\"input_audio_buffer.clear\"}")) { _ in }
+        rtState = .listening
+    }
+
     private func scheduleAudioChunk(_ raw: Data) {
         let frameCount = raw.count / 2
         guard frameCount > 0,
@@ -259,7 +289,10 @@ final class RealtimeSession: ObservableObject {
         raw.withUnsafeBytes { ptr in
             guard let src = ptr.bindMemory(to: Int16.self).baseAddress,
                   let dst = buf.floatChannelData?[0] else { return }
-            for i in 0..<frameCount { dst[i] = Float(src[i]) / 32_767.0 }
+            // 3.5× gain to match previous TTS volume; clamp to avoid clipping
+            for i in 0..<frameCount {
+                dst[i] = max(-1.0, min(1.0, Float(src[i]) / 32_767.0 * 3.5))
+            }
         }
 
         pendingBufferCount += 1
@@ -274,9 +307,8 @@ final class RealtimeSession: ObservableObject {
 
     private func checkTransitionToListening() {
         if responseDone && pendingBufferCount == 0 && rtState == .speaking {
-            // Clear any echo audio OpenAI may have buffered while AI was speaking
             wsTask?.send(.string("{\"type\":\"input_audio_buffer.clear\"}")) { _ in }
-            micMuted = false   // unmute mic so user can speak again
+            micMuted = false
             rtState = .listening
             responseDone = false
         }

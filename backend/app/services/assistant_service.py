@@ -71,8 +71,10 @@ def _build_system_prompt(mode: str, emotion: str, source: str | None = None, fir
     personalization = ""
     if first_name:
         personalization = (
-            f" The user's first name is {first_name}. Use their name naturally in greetings or support moments, "
-            "but avoid repeating it every turn. If asked their name, answer correctly."
+            f" The user's first name is {first_name}. "
+            f"Always open each new voice session by greeting them warmly by name: say 'Hi {first_name}!' or similar. "
+            "Use their name naturally in support moments but not every turn. "
+            f"If asked the user's name, say it is {first_name}."
         )
 
     base = (

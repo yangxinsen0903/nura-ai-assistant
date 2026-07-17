@@ -65,12 +65,16 @@ async def realtime_ws(
                         "output": {
                             "format": {"type": "audio/pcm", "rate": 24000},
                             "voice": "coral",
-                            "speed": 1.0,
+                            "speed": 0.85,
                         },
                     },
                 },
             }
             await oai_ws.send(json.dumps(session_update))
+
+            # If we know the user's name, trigger an immediate greeting from Nura
+            if first_name:
+                await oai_ws.send(json.dumps({"type": "response.create"}))
 
             async def from_client() -> None:
                 try:
