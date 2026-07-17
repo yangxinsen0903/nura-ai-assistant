@@ -88,47 +88,38 @@ final class RealtimeSession: ObservableObject {
 
     @discardableResult
     private func setupAudio() -> Bool {
-        // Always start from a fresh engine to avoid "already attached" crashes
         engine = AVAudioEngine()
         player = AVAudioPlayerNode()
 
         let session = AVAudioSession.sharedInstance()
         do {
+            // No setPreferredSampleRate — let hardware choose; we resample in callback
             try session.setCategory(.playAndRecord, mode: .voiceChat,
                                     options: [.allowBluetoothA2DP, .allowAirPlay])
-            try session.setPreferredSampleRate(24_000)
             try session.overrideOutputAudioPort(.speaker)
             try session.setActive(true)
         } catch {
-            print("[RT] AVAudioSession setup error: \(error)")
+            print("[RT] AVAudioSession error: \(error)")
         }
 
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: playFmt)
 
-        // Start engine FIRST — only then is inputNode's format reliable
+        // nil format: engine uses native hardware format for the tap.
+        // buffer.format in the callback has the real sample rate — no upfront query needed.
+        engine.inputNode.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buf, _ in
+            self?.handleMicBuffer(buf)
+        }
+
         do {
             try engine.start()
         } catch {
             print("[RT] engine.start() failed: \(error)")
+            engine.inputNode.removeTap(onBus: 0)
             return false
         }
 
         player.play()
-
-        // Query format after engine is running
-        let inputNode = engine.inputNode
-        let hwFmt = inputNode.outputFormat(forBus: 0)
-        guard hwFmt.sampleRate > 0 else {
-            print("[RT] invalid input format: \(hwFmt)")
-            engine.stop()
-            return false
-        }
-
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFmt) { [weak self] buf, _ in
-            self?.handleMicBuffer(buf)
-        }
-
         return true
     }
 
